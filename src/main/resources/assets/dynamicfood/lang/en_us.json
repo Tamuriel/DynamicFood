@@ -1,0 +1,5 @@
+{
+  "item.dynamicfood.example": "Dynamic Food Example",
+  "command.dynamicfood.inspect.success": "Dynamic food value: %s",
+  "command.dynamicfood.inspect.fail": "No dynamic value present."
+}

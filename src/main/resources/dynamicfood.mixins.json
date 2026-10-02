@@ -1,0 +1,22 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "com.jorjik.dynamicfood.compat.mixin",
+  "plugin": "com.jorjik.dynamicfood.compat.OptionalMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "VanillaFurnaceMixin",
+    "VanillaCampfireMixin",
+    "CreateBasinMixin",
+    "CreateBasinRecipeMixin",
+    "CreateRecipeApplierMixin",
+    "CreateDeployerMixin",
+    "CreateFillingMixin",
+    "FarmerDelightCookingPotMixin",
+    "FarmerDelightCuttingBoardMixin",
+    "FarmerDelightCuttingRecipeMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

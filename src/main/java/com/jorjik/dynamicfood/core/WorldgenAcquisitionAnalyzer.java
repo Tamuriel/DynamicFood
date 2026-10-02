@@ -1,0 +1,393 @@
+package com.jorjik.dynamicfood.core;
+
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.Set;
+import java.util.TreeSet;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.server.packs.resources.ResourceManager;
+
+public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
+    private final Map<String, List<WorldgenSource>> sourcesByItem;
+
+    private WorldgenAcquisitionAnalyzer(Map<String, List<WorldgenSource>> sourcesByItem) {
+        this.sourcesByItem = Map.copyOf(sourcesByItem);
+    }
+
+    public static WorldgenAcquisitionAnalyzer fromResourceManager(ResourceManager resourceManager) {
+        Map<String, JsonObject> jsonResources = new HashMap<>();
+        for (String directory : List.of("worldgen/biome", "worldgen/placed_feature",
+            "worldgen/configured_feature", "worldgen/dimension",
+            "worldgen/multi_noise_biome_source_parameter_list")) {
+            resourceManager.listResources(directory, id -> id.getPath().endsWith(".json"))
+                .entrySet().stream().sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> parseResource(entry.getKey(), entry.getValue())
+                    .ifPresent(json -> jsonResources.put(entry.getKey().toString(), json)));
+        }
+        return fromJsonResources(jsonResources);
+    }
+
+    public static WorldgenAcquisitionAnalyzer fromJsonResources(Map<String, JsonObject> jsonResources) {
+        Map<String, List<WorldgenBlockSource>> discovered = discoverBlockSources(jsonResources);
+        Map<String, List<WorldgenSource>> indexed = new HashMap<>();
+        discovered.forEach((blockId, sources) -> {
+            ResourceLocation blockLocation = ResourceLocation.tryParse(blockId);
+            if (blockLocation == null) {
+                return;
+            }
+            var block = BuiltInRegistries.BLOCK.getOptional(blockLocation).orElse(null);
+            if (block == null) {
+                return;
+            }
+            var item = block.asItem();
+            if (item == net.minecraft.world.item.Items.AIR) {
+                return;
+            }
+            String itemId = BuiltInRegistries.ITEM.getKey(item).toString();
+            sources.forEach(source -> indexed.computeIfAbsent(itemId, ignored -> new ArrayList<>())
+                .add(new WorldgenSource(source.sourceId(), source.biomeId(), source.placedFeatureId(), blockId,
+                    source.measurements(), source.attributes())));
+        });
+        Map<String, List<WorldgenSource>> frozen = new HashMap<>();
+        indexed.forEach((itemId, sources) -> frozen.put(itemId, sources.stream()
+            .distinct().sorted(Comparator.comparing(WorldgenSource::sourceId)).toList()));
+        return new WorldgenAcquisitionAnalyzer(frozen);
+    }
+
+    public static Map<String, List<WorldgenBlockSource>> discoverBlockSources(Map<String, JsonObject> jsonResources) {
+        Map<String, JsonObject> biomes = resourcesInDirectory(jsonResources, "worldgen/biome");
+        Map<String, JsonObject> placedFeatures = resourcesInDirectory(jsonResources, "worldgen/placed_feature");
+        Map<String, JsonObject> configuredFeatures = resourcesInDirectory(jsonResources, "worldgen/configured_feature");
+        Map<String, Set<String>> dimensionsByBiome = discoverBiomeDimensions(jsonResources, biomes.keySet());
+        Map<String, Set<String>> configuredBlocks = new HashMap<>();
+        Map<String, WorldgenFeatureEvidence> configuredEvidence = new HashMap<>();
+        configuredFeatures.forEach((id, json) -> {
+            Set<String> blocks = new TreeSet<>();
+            collectBlockStateNames(json, blocks);
+            configuredBlocks.put(id, Set.copyOf(blocks));
+            configuredEvidence.put(id, configuredFeatureEvidence(json));
+        });
+
+        Map<String, List<WorldgenBlockSource>> indexed = new HashMap<>();
+        biomes.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(biome -> {
+            Set<String> biomePlacedFeatures = new TreeSet<>();
+            collectKnownReferences(biome.getValue().get("features"), placedFeatures.keySet(), biomePlacedFeatures);
+            for (String placedId : biomePlacedFeatures) {
+                Set<String> configuredReferences = new TreeSet<>();
+                JsonObject placedFeature = placedFeatures.get(placedId);
+                if (placedFeature != null) {
+                    collectKnownReferences(placedFeature.get("feature"), configuredFeatures.keySet(),
+                        configuredReferences);
+                }
+                Set<String> outputBlocks = new TreeSet<>();
+                configuredReferences.forEach(id -> outputBlocks.addAll(configuredBlocks.getOrDefault(id, Set.of())));
+                WorldgenFeatureEvidence placedEvidence = placedFeatureEvidence(placedFeature);
+                for (String blockId : outputBlocks) {
+                    String sourceId = biome.getKey() + "/" + placedId;
+                    indexed.computeIfAbsent(blockId, ignored -> new ArrayList<>())
+                        .add(new WorldgenBlockSource(sourceId, biome.getKey(), placedId,
+                            mergeMeasurements(placedEvidence.measurements(), configuredReferences,
+                                configuredEvidence),
+                            mergeAttributes(Map.of(
+                                "biome_restriction", biome.getKey(),
+                                "placed_feature", placedId,
+                                "configured_features", String.join(",", configuredReferences),
+                                "dimension", dimensionsByBiome.getOrDefault(biome.getKey(), Set.of()).isEmpty()
+                                    ? "unknown: biome-to-dimension relation is not declared by loaded dimension data"
+                                    : String.join(",", dimensionsByBiome.get(biome.getKey()))
+                            ), placedEvidence.attributes())));
+                }
+            }
+        });
+        Map<String, List<WorldgenBlockSource>> frozen = new HashMap<>();
+        indexed.forEach((blockId, sources) -> frozen.put(blockId, sources.stream()
+            .distinct().sorted(Comparator.comparing(WorldgenBlockSource::sourceId)).toList()));
+        return Map.copyOf(frozen);
+    }
+
+    @Override
+    public boolean supports(String itemId) {
+        return sourcesByItem.containsKey(itemId);
+    }
+
+    @Override
+    public List<AcquisitionPath> analyze(String itemId) {
+        List<WorldgenSource> sources = sourcesByItem.get(itemId);
+        if (sources == null) {
+            return List.of();
+        }
+        return sources.stream().map(source -> {
+            Map<String, EconomicFactor> unknownFactors = new HashMap<>();
+            for (String factor : List.of("probability", "expected_yield", "repeatability", "renewability",
+                "progression_requirement", "danger", "equipment_availability")) {
+                unknownFactors.put(factor, EconomicFactor.unknown(
+                    "biome feature reference is known; placement frequency and runtime conditions are not evaluated"));
+            }
+            Map<String, EconomicFactor> unknownCosts = new HashMap<>();
+            for (String factor : List.of("quantity_cost", "time_cost", "startup_cost", "recurring_cost",
+                "prerequisite_cost", "progression_cost", "equipment_cost", "danger_cost", "transport_cost",
+                "intermediate_cost", "resource_consumption_cost", "material_cost")) {
+                unknownCosts.put(factor, EconomicFactor.unknown(
+                    "standard biome/placed-feature data does not establish a measurable acquisition cost"));
+            }
+            Map<Integer, CostVector> costsByHorizon = new HashMap<>();
+            for (int horizon : supportedHorizons()) {
+                costsByHorizon.put(horizon, new CostVector(horizon, unknownCosts));
+            }
+            Map<String, AcquisitionMeasurement> evidence = new HashMap<>(source.measurements());
+            evidence.put("expected_units_per_attempt", AcquisitionMeasurement.unknown(
+                "configured feature replacement targets and runtime conditions do not establish expected item yield"));
+            evidence.put("expected_attempts_per_unit", AcquisitionMeasurement.unknown(
+                "expected item yield from this feature is unknown"));
+            return new AcquisitionPath(itemId, "worldgen_feature", source.sourceId(), 1.0D,
+                null, null, null, false, unknownFactors, costsByHorizon,
+                new AcquisitionEvidence(evidence, source.attributes()));
+        }).toList();
+    }
+
+    public Set<String> indexedItemIds() {
+        return sourcesByItem.keySet();
+    }
+
+    public Map<String, Integer> sourceCounts() {
+        return Map.of("worldgen_feature", sourcesByItem.values().stream().mapToInt(List::size).sum());
+    }
+
+    private static Map<String, JsonObject> resourcesInDirectory(Map<String, JsonObject> resources, String directory) {
+        String prefix = directory + "/";
+        Map<String, JsonObject> result = new HashMap<>();
+        resources.forEach((resourceId, json) -> {
+            ResourceLocation location = ResourceLocation.tryParse(resourceId);
+            if (location == null || !location.getPath().startsWith(prefix)
+                || !location.getPath().endsWith(".json")) {
+                return;
+            }
+            String logicalPath = location.getPath().substring(prefix.length());
+            logicalPath = logicalPath.substring(0, logicalPath.length() - ".json".length());
+            ResourceLocation logicalId = ResourceLocation.fromNamespaceAndPath(location.getNamespace(), logicalPath);
+            result.put(logicalId.toString(), json);
+        });
+        return Map.copyOf(result);
+    }
+
+    private static Map<String, Set<String>> discoverBiomeDimensions(Map<String, JsonObject> resources,
+        Set<String> biomeIds) {
+        Map<String, JsonObject> dimensions = resourcesInDirectory(resources, "worldgen/dimension");
+        Map<String, JsonObject> parameterLists =
+            resourcesInDirectory(resources, "worldgen/multi_noise_biome_source_parameter_list");
+        Map<String, Set<String>> result = new HashMap<>();
+        dimensions.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
+            JsonObject generator = entry.getValue().getAsJsonObject("generator");
+            JsonObject biomeSource = generator == null ? null : generator.getAsJsonObject("biome_source");
+            if (biomeSource == null) {
+                return;
+            }
+            Set<String> referencedBiomes = new TreeSet<>();
+            collectKnownReferences(biomeSource, biomeIds, referencedBiomes);
+            String preset = string(biomeSource, "preset");
+            JsonObject parameterList = preset == null ? null : parameterLists.get(preset);
+            if (parameterList != null) {
+                collectKnownReferences(parameterList, biomeIds, referencedBiomes);
+            }
+            for (String biome : referencedBiomes) {
+                result.computeIfAbsent(biome, ignored -> new TreeSet<>()).add(entry.getKey());
+            }
+        });
+        Map<String, Set<String>> frozen = new HashMap<>();
+        result.forEach((biome, ids) -> frozen.put(biome, Set.copyOf(ids)));
+        return Map.copyOf(frozen);
+    }
+
+    private static List<Integer> supportedHorizons() {
+        return java.util.stream.Stream.of(1, 10, 100,
+                com.jorjik.dynamicfood.config.DynamicFoodConfig.acquisitionEconomicHorizon())
+            .distinct().sorted().toList();
+    }
+
+    private static Optional<JsonObject> parseResource(ResourceLocation id, Resource resource) {
+        try (var reader = resource.openAsReader()) {
+            JsonElement parsed = JsonParser.parseReader(reader);
+            return parsed.isJsonObject() ? Optional.of(parsed.getAsJsonObject()) : Optional.empty();
+        } catch (IOException | RuntimeException exception) {
+            com.jorjik.dynamicfood.DynamicFood.LOGGER.warn("Unable to inspect worldgen data resource {}", id, exception);
+            return Optional.empty();
+        }
+    }
+
+    private static void collectKnownReferences(JsonElement element, Set<String> knownIds, Set<String> found) {
+        if (element == null) {
+            return;
+        }
+        if (element.isJsonArray()) {
+            element.getAsJsonArray().forEach(child -> collectKnownReferences(child, knownIds, found));
+        } else if (element.isJsonObject()) {
+            element.getAsJsonObject().entrySet()
+                .forEach(entry -> collectKnownReferences(entry.getValue(), knownIds, found));
+        } else if (element.isJsonPrimitive() && element.getAsJsonPrimitive().isString()) {
+            String value = element.getAsString();
+            ResourceLocation location = ResourceLocation.tryParse(value);
+            if (location != null && knownIds.contains(location.toString())) {
+                found.add(location.toString());
+            }
+        }
+    }
+
+    private static WorldgenFeatureEvidence placedFeatureEvidence(JsonObject placedFeature) {
+        if (placedFeature == null || !placedFeature.has("placement")
+            || !placedFeature.get("placement").isJsonArray()) {
+            return new WorldgenFeatureEvidence(Map.of(), Map.of());
+        }
+        Map<String, AcquisitionMeasurement> measurements = new HashMap<>();
+        Map<String, String> attributes = new HashMap<>();
+        var modifiers = placedFeature.getAsJsonArray("placement");
+        for (int index = 0; index < modifiers.size(); index++) {
+            JsonElement element = modifiers.get(index);
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject modifier = element.getAsJsonObject();
+            String type = string(modifier, "type");
+            if ("minecraft:count".equals(type)) {
+                measurements.put("placement_count_modifier_" + index,
+                    exactNonNegativeNumber(modifier.get("count"), "placement count is not a literal constant"));
+            } else if ("minecraft:rarity_filter".equals(type)) {
+                OptionalDouble chance = exactPositiveInteger(modifier.get("chance"));
+                measurements.put("rarity_filter_chance_" + index, chance.isPresent()
+                    ? AcquisitionMeasurement.known(1.0D / chance.getAsDouble())
+                    : AcquisitionMeasurement.unknown("rarity-filter chance is not a positive integer"));
+            } else if ("minecraft:height_range".equals(type)) {
+                attributes.put("height_restriction_" + index,
+                    "height range is configured; range distribution is not reduced to item yield");
+            } else if ("minecraft:biome".equals(type)) {
+                attributes.put("biome_filter_" + index, "placed-feature biome filter is present");
+            }
+        }
+        return new WorldgenFeatureEvidence(Map.copyOf(measurements), Map.copyOf(attributes));
+    }
+
+    private static WorldgenFeatureEvidence configuredFeatureEvidence(JsonObject configuredFeature) {
+        Map<String, AcquisitionMeasurement> measurements = new HashMap<>();
+        Map<String, String> attributes = new HashMap<>();
+        String type = string(configuredFeature, "feature");
+        if (type != null) {
+            attributes.put("configured_feature_type", type);
+        }
+        JsonObject config = configuredFeature.getAsJsonObject("config");
+        if (config != null && config.has("size")) {
+            measurements.put("configured_cluster_size", exactNonNegativeNumber(config.get("size"),
+                "configured cluster size is not a literal constant"));
+        } else {
+            measurements.put("configured_cluster_size",
+                AcquisitionMeasurement.unknown("configured feature has no literal cluster size"));
+        }
+        return new WorldgenFeatureEvidence(Map.copyOf(measurements), Map.copyOf(attributes));
+    }
+
+    private static Map<String, AcquisitionMeasurement> mergeMeasurements(
+        Map<String, AcquisitionMeasurement> placed,
+        Set<String> configuredIds, Map<String, WorldgenFeatureEvidence> configured) {
+        Map<String, AcquisitionMeasurement> result = new HashMap<>(placed);
+        for (String id : configuredIds) {
+            WorldgenFeatureEvidence evidence = configured.get(id);
+            if (evidence != null) {
+                evidence.measurements().forEach((name, value) ->
+                    result.put("configured:" + id + ":" + name, value));
+            }
+        }
+        return Map.copyOf(result);
+    }
+
+    private static Map<String, String> mergeAttributes(Map<String, String> attributes,
+        Map<String, String> additional) {
+        Map<String, String> result = new HashMap<>(attributes);
+        result.putAll(additional);
+        return Map.copyOf(result);
+    }
+
+    private static AcquisitionMeasurement exactNonNegativeNumber(JsonElement element, String unknownReason) {
+        OptionalDouble number = exactNumber(element);
+        return number.isPresent() && number.getAsDouble() >= 0.0D
+            ? AcquisitionMeasurement.known(number.getAsDouble())
+            : AcquisitionMeasurement.unknown(unknownReason);
+    }
+
+    private static OptionalDouble exactPositiveInteger(JsonElement element) {
+        OptionalDouble number = exactNumber(element);
+        if (number.isEmpty() || number.getAsDouble() < 1.0D
+            || number.getAsDouble() != Math.rint(number.getAsDouble())) {
+            return OptionalDouble.empty();
+        }
+        return number;
+    }
+
+    private static OptionalDouble exactNumber(JsonElement element) {
+        if (element == null) {
+            return OptionalDouble.empty();
+        }
+        if (element.isJsonPrimitive() && element.getAsJsonPrimitive().isNumber()) {
+            double value = element.getAsDouble();
+            return Double.isFinite(value) ? OptionalDouble.of(value) : OptionalDouble.empty();
+        }
+        if (element.isJsonObject()) {
+            JsonObject object = element.getAsJsonObject();
+            if ("minecraft:constant".equals(string(object, "type"))) {
+                return exactNumber(object.get("value"));
+            }
+        }
+        return OptionalDouble.empty();
+    }
+
+    private static String string(JsonObject object, String key) {
+        JsonElement value = object.get(key);
+        return value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
+            ? value.getAsString() : null;
+    }
+
+    private static void collectBlockStateNames(JsonElement element, Set<String> found) {
+        if (element == null) {
+            return;
+        }
+        if (element.isJsonArray()) {
+            element.getAsJsonArray().forEach(child -> collectBlockStateNames(child, found));
+        } else if (element.isJsonObject()) {
+            JsonObject object = element.getAsJsonObject();
+            JsonElement name = object.get("Name");
+            if (name != null && name.isJsonPrimitive() && name.getAsJsonPrimitive().isString()) {
+                ResourceLocation blockId = ResourceLocation.tryParse(name.getAsString());
+                if (blockId != null) {
+                    found.add(blockId.toString());
+                }
+            }
+            object.entrySet().forEach(entry -> collectBlockStateNames(entry.getValue(), found));
+        }
+    }
+
+    private record WorldgenSource(String sourceId, String biomeId, String placedFeatureId, String blockId,
+        Map<String, AcquisitionMeasurement> measurements, Map<String, String> attributes) {}
+
+    private record WorldgenFeatureEvidence(Map<String, AcquisitionMeasurement> measurements,
+        Map<String, String> attributes) {}
+
+    public record WorldgenBlockSource(String sourceId, String biomeId, String placedFeatureId,
+        Map<String, AcquisitionMeasurement> measurements, Map<String, String> attributes) {
+        public WorldgenBlockSource(String sourceId, String biomeId, String placedFeatureId) {
+            this(sourceId, biomeId, placedFeatureId, Map.of(), Map.of());
+        }
+
+        public WorldgenBlockSource {
+            measurements = Map.copyOf(measurements);
+            attributes = Map.copyOf(attributes);
+        }
+    }
+}
