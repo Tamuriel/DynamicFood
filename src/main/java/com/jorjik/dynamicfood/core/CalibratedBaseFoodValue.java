@@ -11,7 +11,7 @@ public record CalibratedBaseFoodValue(
 ) {
     public CalibratedBaseFoodValue {
         if (!finiteNonNegative(nutrition) || !finiteNonNegative(effectiveSaturation)
-            || !unit(foodIndex) || !unit(economicCost) || !Double.isFinite(difficulty)
+            || !unit(foodIndex) || !finiteNonNegative(economicCost) || !Double.isFinite(difficulty)
             || difficulty < 0.0D || difficulty > 5.0D) {
             throw new IllegalArgumentException("invalid calibrated base food value");
         }

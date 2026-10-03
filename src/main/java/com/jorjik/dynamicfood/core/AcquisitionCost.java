@@ -2,6 +2,7 @@ package com.jorjik.dynamicfood.core;
 
 import java.util.Map;
 
+/** A path-level aggregate of normalized acquisition diagnostics at one observation horizon. */
 public record AcquisitionCost(
     Double cost,
     ResolutionStatus status,

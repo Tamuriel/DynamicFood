@@ -30,10 +30,9 @@ public final class DynamicFoodCommand {
                     var economic = DynamicFood.ENGINE.recipeEconomicResult(itemId);
                     var resolvedEconomic = DynamicFood.ENGINE.economicCostResolution(itemId);
                     var resourceDifficulty = DynamicFood.ENGINE.resourceDifficulty(itemId);
-                    output.append("\nEconomic cost: ").append(economic.economicCost() == null ? "UNKNOWN" : economic.economicCost())
+                    output.append("\nRecipe EconomicCost: ").append(economicCostLabel(economic.target()))
                         .append(" (status=").append(economic.status()).append(')');
-                    output.append("\nAcquisition resolution: ").append(resolvedEconomic.economicCost() == null
-                        ? "UNKNOWN" : resolvedEconomic.economicCost())
+                    output.append("\nAcquisition EconomicCost: ").append(economicCostLabel(resolvedEconomic.target()))
                         .append(" (status=").append(resolvedEconomic.status())
                         .append(", horizon=").append(resolvedEconomic.economicHorizon())
                         .append(", confidence=").append(resolvedEconomic.confidence()).append(')');
@@ -259,6 +258,14 @@ public final class DynamicFoodCommand {
         DynamicFood.ENGINE.calibrationDiscoveryDiagnostics()
             .forEach(line -> report.append("\n").append(line));
         return report.toString();
+    }
+
+    private static String economicCostLabel(com.jorjik.dynamicfood.core.EconomicCost target) {
+        if (!target.isKnown()) {
+            return "UNKNOWN (" + target.evidence() + ")";
+        }
+        return target.value() + " [primitive=" + target.primitiveId()
+            + ", horizon=" + target.observationHorizon() + ", evidence=" + target.evidence() + "]";
     }
 
     private static double weightedFoodIndexQuantile(CalibrationSnapshot snapshot, double quantile) {

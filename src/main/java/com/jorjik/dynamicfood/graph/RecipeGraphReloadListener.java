@@ -65,12 +65,13 @@ public final class RecipeGraphReloadListener extends SimplePreparableReloadListe
             List<AcquisitionIngredient> acquisitionInputs = new ArrayList<>();
             for (Ingredient ingredient : recipe.getIngredients()) {
                 inputs.add(resolveIngredientDefinition(ingredient));
+                ItemStack[] alternatives = ingredient.getItems();
                 acquisitionInputs.add(new AcquisitionIngredient(
-                    java.util.Arrays.stream(ingredient.getItems())
+                    java.util.Arrays.stream(alternatives)
                         .map(stack -> BuiltInRegistries.ITEM.getKey(stack.getItem()))
                         .filter(java.util.Objects::nonNull)
                         .map(Object::toString)
-                        .toList(), 1));
+                        .toList(), 1, classifyInputUse(alternatives)));
             }
             nodes.add(new RecipeNode(
                 holder.id().toString(),
@@ -123,6 +124,28 @@ public final class RecipeGraphReloadListener extends SimplePreparableReloadListe
                 "Could not read the Farmer's Delight CookingPotRecipe cook time", exception);
         }
         return null;
+    }
+
+    private static AcquisitionIngredient.InputUse classifyInputUse(ItemStack[] alternatives) {
+        if (alternatives.length == 0) {
+            return AcquisitionIngredient.InputUse.UNKNOWN;
+        }
+        boolean hasConsumed = false;
+        boolean hasReusable = false;
+        for (ItemStack alternative : alternatives) {
+            var remainder = alternative.getItem().getCraftingRemainingItem();
+            if (remainder == null) {
+                hasConsumed = true;
+            } else if (remainder == alternative.getItem()) {
+                hasReusable = true;
+            } else {
+                return AcquisitionIngredient.InputUse.UNKNOWN;
+            }
+        }
+        if (hasConsumed && hasReusable) {
+            return AcquisitionIngredient.InputUse.UNKNOWN;
+        }
+        return hasReusable ? AcquisitionIngredient.InputUse.REUSABLE : AcquisitionIngredient.InputUse.CONSUMED;
     }
 
     private static IngredientContribution resolveIngredientDefinition(Ingredient ingredient) {

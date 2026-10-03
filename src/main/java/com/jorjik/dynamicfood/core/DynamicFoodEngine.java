@@ -125,8 +125,6 @@ public final class DynamicFoodEngine {
         Map<String, ResourceEconomicProfile> byItem = new HashMap<>();
         profiles.forEach(profile -> byItem.put(profile.resourceId(), profile));
         economicProfiles = Map.copyOf(byItem);
-        villagerTradeAcquisitionAnalyzer = villagerTradeAcquisitionAnalyzer
-            .withInputCosts(knownEconomicCosts(economicProfiles));
         recipeEconomicAnalyzer = null;
         recipeGraphAcquisitionAnalyzer = null;
         if (lootTableAcquisitionAnalyzer != null) {
@@ -146,8 +144,6 @@ public final class DynamicFoodEngine {
         Map<String, ResourceEconomicProfile> configuredByItem = new HashMap<>();
         configuredProfiles.forEach(profile -> configuredByItem.put(profile.resourceId(), profile));
         economicProfiles = Map.copyOf(configuredByItem);
-        villagerTradeAcquisitionAnalyzer = villagerTradeAcquisitionAnalyzer
-            .withInputCosts(knownEconomicCosts(economicProfiles));
         recipeEconomicAnalyzer = null;
         recipeGraphAcquisitionAnalyzer = null;
         economicResolutionCache.clear();
@@ -241,8 +237,6 @@ public final class DynamicFoodEngine {
 
         rebuildCalibration(population, settings);
         economicProfiles = Map.copyOf(allProfiles);
-        villagerTradeAcquisitionAnalyzer = villagerTradeAcquisitionAnalyzer
-            .withInputCosts(knownEconomicCosts(economicProfiles));
         economicResolutionCache.clear();
         acquisitionPathCache.clear();
         Map<String, Integer> sourceCounts = lootTableAcquisitionAnalyzer == null
@@ -335,10 +329,12 @@ public final class DynamicFoodEngine {
         if (calibrated == null) {
             return Optional.empty();
         }
+        Double resolvedDifficulty = resourceDifficulty(itemId).score();
+        double difficulty = resolvedDifficulty == null ? 0.0D : resolvedDifficulty;
         return Optional.of(new CalibratedBaseFoodValue(
             snapshot.hungerCurve().evaluate(calibrated.foodIndex()),
             snapshot.saturationCurve().evaluate(calibrated.foodIndex()),
-            calibrated.foodIndex(), calibrated.economicCost(), calibrated.economicCost() * 5.0D,
+            calibrated.foodIndex(), calibrated.economicCost(), difficulty,
             snapshot.status(), "self_calibrated"));
     }
 
@@ -364,20 +360,13 @@ public final class DynamicFoodEngine {
             synchronized (this) {
                 analyzer = recipeEconomicAnalyzer;
                 if (analyzer == null) {
-                    Map<String, Double> terminalCosts = new HashMap<>();
-                    economicProfiles.forEach((id, profile) -> {
-                        if (profile.economicCost() != null) {
-                            terminalCosts.put(id, profile.economicCost());
-                        }
-                    });
-                    analyzer = new RecipeEconomicAnalyzer(graph, terminalCosts,
-                        com.jorjik.dynamicfood.config.DynamicFoodConfig.materialCostReference(),
-                        com.jorjik.dynamicfood.config.DynamicFoodConfig.materialCostCap());
+                    analyzer = new RecipeEconomicAnalyzer(graph, EconomicCostEvidenceProvider.unknown());
                     recipeEconomicAnalyzer = analyzer;
                 }
             }
         }
-        return analyzer.resolve(itemId);
+        return analyzer.resolve(itemId,
+            com.jorjik.dynamicfood.config.DynamicFoodConfig.acquisitionEconomicHorizon());
     }
 
     public List<AcquisitionPath> acquisitionPaths(String itemId) {
@@ -390,13 +379,7 @@ public final class DynamicFoodEngine {
             synchronized (this) {
                 analyzer = recipeGraphAcquisitionAnalyzer;
                 if (analyzer == null) {
-                    Map<String, Double> terminalCosts = new HashMap<>();
-                    economicProfiles.forEach((id, profile) -> {
-                        if (profile.economicCost() != null) {
-                            terminalCosts.put(id, profile.economicCost());
-                        }
-                    });
-                    analyzer = new RecipeGraphAcquisitionAnalyzer(graph, terminalCosts,
+                    analyzer = new RecipeGraphAcquisitionAnalyzer(graph, EconomicCostEvidenceProvider.unknown(),
                         com.jorjik.dynamicfood.config.DynamicFoodConfig.materialCostReference(),
                         com.jorjik.dynamicfood.config.DynamicFoodConfig.materialCostCap(),
                         com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsReference(),
@@ -423,16 +406,6 @@ public final class DynamicFoodEngine {
             }
         }
         return paths.stream().sorted(java.util.Comparator.comparing(AcquisitionPath::sourceId)).toList();
-    }
-
-    private static Map<String, Double> knownEconomicCosts(Map<String, ResourceEconomicProfile> profiles) {
-        Map<String, Double> costs = new HashMap<>();
-        profiles.forEach((itemId, profile) -> {
-            if (profile.economicCost() != null) {
-                costs.put(itemId, profile.economicCost());
-            }
-        });
-        return Map.copyOf(costs);
     }
 
     public ResourceDifficulty resourceDifficulty(String itemId) {
@@ -480,11 +453,9 @@ public final class DynamicFoodEngine {
             DynamicFoodConfig.acquisitionEconomicHorizon(),
             DynamicFoodConfig.acquisitionStrategy(),
             DynamicFoodConfig.feasibilityFactorWeights(),
-            DynamicFoodConfig.costFactorWeights(),
             DynamicFoodConfig.minimumFeasibility(),
             DynamicFoodConfig.minimumFeasibilityCoverage(),
-            DynamicFoodConfig.allowPartialFeasibility(),
-            DynamicFoodConfig.allowPartialCost());
+            DynamicFoodConfig.allowPartialFeasibility());
         return economicResolutionCache.computeIfAbsent(itemId, ignored -> resolved);
     }
 
@@ -498,7 +469,8 @@ public final class DynamicFoodEngine {
         lootTableAcquisitionAnalyzer = LootTableAcquisitionAnalyzer.fromResourceManager(resources,
             com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsReference(),
             com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsCap());
-        worldgenAcquisitionAnalyzer = WorldgenAcquisitionAnalyzer.fromResourceManager(resources);
+        worldgenAcquisitionAnalyzer = WorldgenAcquisitionAnalyzer.fromResourceManager(resources,
+            lootTableAcquisitionAnalyzer);
         economicResolutionCache.clear();
         acquisitionPathCache.clear();
     }

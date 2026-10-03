@@ -28,10 +28,8 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
     private final Map<String, List<TradeOutput>> outputsByProfession;
     private final Map<String, List<TradeOutput>> outputsByItem;
     private final int unindexedListingCount;
-    private final Map<String, Double> knownInputCosts;
 
-    private VillagerTradeAcquisitionAnalyzer(Map<String, List<TradeOutput>> outputsByProfession,
-        Map<String, Double> knownInputCosts) {
+    private VillagerTradeAcquisitionAnalyzer(Map<String, List<TradeOutput>> outputsByProfession) {
         Map<String, List<TradeOutput>> professionSnapshot = new TreeMap<>();
         outputsByProfession.forEach((profession, outputs) ->
             professionSnapshot.put(profession, List.copyOf(outputs)));
@@ -52,15 +50,10 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
             .sorted(Comparator.comparing(TradeOutput::sourceId)).toList());
         this.outputsByItem = Map.copyOf(byItem);
         this.unindexedListingCount = unindexed;
-        this.knownInputCosts = Map.copyOf(knownInputCosts);
     }
 
     public static VillagerTradeAcquisitionAnalyzer empty() {
-        return new VillagerTradeAcquisitionAnalyzer(Map.of(), Map.of());
-    }
-
-    public VillagerTradeAcquisitionAnalyzer withInputCosts(Map<String, Double> inputCosts) {
-        return new VillagerTradeAcquisitionAnalyzer(outputsByProfession, inputCosts);
+        return new VillagerTradeAcquisitionAnalyzer(Map.of());
     }
 
     public VillagerTradeAcquisitionAnalyzer withProfession(String professionId,
@@ -103,7 +96,7 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
 
         Map<String, List<TradeOutput>> updated = new TreeMap<>(outputsByProfession);
         updated.put(professionId, List.copyOf(outputs));
-        return new VillagerTradeAcquisitionAnalyzer(updated, knownInputCosts);
+        return new VillagerTradeAcquisitionAnalyzer(updated);
     }
 
     @Override
@@ -121,7 +114,7 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
             Map<String, EconomicFactor> costs = new HashMap<>();
             Map<Integer, CostVector> horizons = new HashMap<>();
             for (int horizon : supportedHorizons()) {
-                EconomicFactor materialCost = materialCost(output, horizon);
+                EconomicFactor materialCost = materialCost(output);
                 costs.clear();
                 costs.put("quantity_cost", FactorNormalizer.quantityCostForHorizon(output.outputCount(),
                     horizon, DynamicFoodConfig.lootAttemptsReference(), DynamicFoodConfig.lootAttemptsCap()));
@@ -165,11 +158,14 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
             ));
             for (TradeInput input : output.inputs()) {
                 evidence.put("input_quantity:" + input.itemId(), AcquisitionMeasurement.known(input.quantity()));
-                Double inputCost = knownInputCosts.get(input.itemId());
-                evidence.put("input_economic_cost:" + input.itemId(), inputCost == null
-                    ? AcquisitionMeasurement.unknown("no resolved economic profile for trade input")
-                    : AcquisitionMeasurement.known(inputCost));
+                evidence.put("input_economic_cost:" + input.itemId(), AcquisitionMeasurement.unknown(
+                    "no compatible recursively resolved EconomicCost is available for this trade input"));
             }
+            evidence.put("restock_dependency", AcquisitionMeasurement.unknown(
+                "maximum uses are known, but workstation access and restock completion are not resolved"));
+            evidence.put("required_villager_level", AcquisitionMeasurement.known(output.level()));
+            evidence.put("progression_gate", AcquisitionMeasurement.unknown(
+                "the required level is recorded, but villager leveling inputs and progression are unresolved"));
             for (int horizon : supportedHorizons()) {
                 evidence.put("expected_successful_offers_to_obtain_" + horizon,
                     AcquisitionMeasurement.known(horizon / (double) output.outputCount()));
@@ -179,7 +175,8 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
                 Map.ofEntries(
                     Map.entry("probability", EconomicFactor.notApplicable(
                         "the player chooses the available listed trade")),
-                    Map.entry("expected_yield", EconomicFactor.known(1.0D)),
+                    Map.entry("expected_yield", EconomicFactor.notApplicable(
+                        "deterministic trade output quantity is represented by canonical quantity")),
                     Map.entry("repeatability", output.maxUses() > 0
                         ? EconomicFactor.known(1.0D)
                         : EconomicFactor.unknown("trade offer has no positive maximum-use limit")),
@@ -208,25 +205,10 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
         }).toList();
     }
 
-    private EconomicFactor materialCost(TradeOutput output, int horizon) {
-        double perOfferCost = 0.0D;
-        List<String> missing = new ArrayList<>();
-        for (TradeInput input : output.inputs()) {
-            Double inputCost = knownInputCosts.get(input.itemId());
-            if (inputCost == null) {
-                missing.add(input.itemId() + ": economic input cost is unresolved");
-            } else {
-                perOfferCost += inputCost * input.quantity();
-            }
-        }
-        if (!missing.isEmpty() || output.inputs().isEmpty()) {
-            return EconomicFactor.unknown(output.inputs().isEmpty()
-                ? "trade input prices were not safely captured"
-                : String.join("; ", missing));
-        }
-        double totalCost = perOfferCost / output.outputCount() * horizon;
-        return FactorNormalizer.logarithmic(totalCost,
-            DynamicFoodConfig.materialCostReference(), DynamicFoodConfig.materialCostCap());
+    private EconomicFactor materialCost(TradeOutput output) {
+        return EconomicFactor.unknown(output.inputs().isEmpty()
+            ? "fixed trade inputs are unavailable"
+            : "trade input economics cannot be recursively resolved to compatible EconomicCost values");
     }
 
     private static Map<String, String> tradeAttributes(TradeOutput output) {
@@ -235,9 +217,14 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
         attributes.put("profession", output.sourceId().substring(0, output.sourceId().indexOf("/level_")));
         attributes.put("villager_level", Integer.toString(output.level()));
         attributes.put("maximum_uses", Integer.toString(output.maxUses()));
-        attributes.put("input_prices", output.inputs().toString());
+        attributes.put("input_quantities", output.inputs().toString());
         attributes.put("price_model", "base listing price; demand, reputation, and temporary discounts excluded");
         attributes.put("canonical_quantity_source", "output quantity per player-selected completed offer");
+        attributes.put("canonical_quantity_unit", "item per completed trade offer");
+        attributes.put("canonical_quantity_semantics", "guaranteed listing output per completed offer");
+        attributes.put("survival_availability",
+            "unknown: registered listing does not prove profession access, villager availability, or restocking");
+        attributes.put("source_availability_classification", "UNKNOWN");
         if (output.priceMultiplier() != null) {
             attributes.put("dynamic_price_multiplier", Float.toString(output.priceMultiplier()));
         }

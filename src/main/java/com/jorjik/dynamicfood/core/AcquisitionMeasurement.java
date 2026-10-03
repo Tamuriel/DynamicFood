@@ -1,5 +1,6 @@
 package com.jorjik.dynamicfood.core;
 
+/** An unnormalized observed metric; it is not an EconomicFactor or an economic value. */
 public record AcquisitionMeasurement(Double value, String unknownReason) {
     public AcquisitionMeasurement {
         if (value != null && !Double.isFinite(value)) {

@@ -14,8 +14,6 @@ public final class AcquisitionCostResolver {
         Map<String, Double> used = new LinkedHashMap<>();
         Map<String, String> missing = new LinkedHashMap<>();
         Map<String, String> notApplicable = new LinkedHashMap<>();
-        EconomicFactor canonicalQuantity = vector.factors().get("quantity_cost");
-        boolean quantityKnown = canonicalQuantity != null && canonicalQuantity.isKnown();
         for (Map.Entry<String, Double> entry : new TreeMap<>(factorWeights).entrySet()) {
             double weight = entry.getValue();
             if (!Double.isFinite(weight) || weight < 0.0D) {
@@ -27,11 +25,6 @@ public final class AcquisitionCostResolver {
             EconomicFactor factor = vector.factors().get(entry.getKey());
             if (factor != null && factor.isNotApplicable()) {
                 notApplicable.put(entry.getKey(), factor.reason());
-                continue;
-            }
-            if (quantityKnown && (entry.getKey().equals("probability_cost")
-                || entry.getKey().equals("yield_cost"))) {
-                missing.put(entry.getKey(), "diagnostic only: already represented by canonical quantity_cost");
                 continue;
             }
             configuredWeight += weight;

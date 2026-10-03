@@ -29,6 +29,10 @@ runs {
     server { argument '--nogui' }
     gameTestServer {
         modSource sourceSets.test
+        def gameTestNamespaces = providers.gradleProperty('gameTestNamespaces').getOrNull()
+        if (gameTestNamespaces != null) {
+            systemProperty 'neoforge.enabledGameTestNamespaces', gameTestNamespaces
+        }
         workingDirectory providers.gradleProperty('gameTestWorkingDirectory')
             .map { file(it) }
             .orElse(project.layout.projectDirectory.dir('run').dir('gameTestServer-clean'))

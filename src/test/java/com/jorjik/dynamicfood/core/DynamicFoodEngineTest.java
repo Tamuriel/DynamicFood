@@ -48,6 +48,15 @@ class DynamicFoodEngineTest {
         assertEquals(ResolutionStatus.UNKNOWN, invalid.isKnown() ? ResolutionStatus.COMPLETE : ResolutionStatus.UNKNOWN);
         assertEquals(quantity.value(), cost.cost(), 0.0001D);
         assertEquals(Map.of("quantity_cost", quantity.value()), cost.normalizedFactors());
+
+        AcquisitionCost notApplicable = AcquisitionCostResolver.resolve(new CostVector(100, Map.of(
+            "quantity_cost", quantity,
+            "probability_cost", EconomicFactor.notApplicable("probability is represented by canonical quantity"),
+            "yield_cost", EconomicFactor.notApplicable("yield is represented by canonical quantity")
+        )), Map.of("quantity_cost", 1.0D, "probability_cost", 1.0D, "yield_cost", 1.0D));
+        assertEquals(ResolutionStatus.COMPLETE, notApplicable.status());
+        assertTrue(notApplicable.missingFactors().isEmpty());
+        assertEquals(2, notApplicable.notApplicableFactors().size());
     }
 
     @Test
@@ -57,6 +66,11 @@ class DynamicFoodEngineTest {
         assertTrue(normalized.isKnown());
         assertTrue(normalized.value() > 0.0D && normalized.value() < 1.0D);
         assertEquals(1.0D, FactorNormalizer.logarithmic(1.0E300D, 1.0D, 1.0E200D).value(), 0.0D);
+        EconomicFactor horizon1 = FactorNormalizer.quantityCostForHorizon(0.5D, 1, 1.0D, 10000.0D);
+        EconomicFactor horizon100 = FactorNormalizer.quantityCostForHorizon(0.5D, 100, 1.0D, 10000.0D);
+        EconomicFactor horizon1000 = FactorNormalizer.quantityCostForHorizon(0.5D, 1000, 1.0D, 10000.0D);
+        assertTrue(horizon1.value() < horizon100.value());
+        assertTrue(horizon100.value() < horizon1000.value());
     }
 
     @Test
@@ -125,6 +139,41 @@ class DynamicFoodEngineTest {
     }
 
     @Test
+    void deterministicRecipeUsesCanonicalQuantityWithoutProbabilityOrYieldPenalties() {
+        RecipeGraph graph = new RecipeGraph();
+        graph.add(new RecipeNode("test:batch_recipe", "minecraft:crafting", "test:batch", 4,
+            List.of(), 200.0D,
+            List.of(new AcquisitionIngredient(List.of("test:raw_material"), 1))));
+        RecipeGraphAcquisitionAnalyzer analyzer = new RecipeGraphAcquisitionAnalyzer(graph,
+            (itemId, horizon) -> itemId.equals("test:raw_material")
+                ? EconomicCost.known(10.0D, "test:burden_units", horizon, "measured raw material burden")
+                : EconomicCost.unknown("no evidence for " + itemId), 1.0D, 100.0D);
+
+        AcquisitionPath path = analyzer.analyze("test:batch").getFirst();
+        CostVector costs = path.costsByHorizon().get(100);
+        AcquisitionCost acquisitionCost = AcquisitionCostResolver.resolve(costs, Map.of(
+            "quantity_cost", 1.0D, "probability_cost", 1.0D, "yield_cost", 1.0D));
+        FeasibilityResult feasibility = FeasibilityResolver.resolve(path, Map.of(
+            "probability", 1.0D, "expected_yield", 1.0D, "repeatability", 1.0D),
+            1.0D, 0.0D, false);
+
+        assertTrue(costs.factors().get("probability_cost").isNotApplicable());
+        assertTrue(costs.factors().get("yield_cost").isNotApplicable());
+        assertTrue(path.feasibilityFactors().get("probability").isNotApplicable());
+        assertTrue(path.feasibilityFactors().get("expected_yield").isNotApplicable());
+        assertEquals("recipe outputCount", path.evidence().attributes().get("canonical_quantity_source"));
+        assertEquals("item per completed recipe operation",
+            path.evidence().attributes().get("canonical_quantity_unit"));
+        assertEquals(4.0D, path.evidence().measurement("expected_units_per_attempt").value(), 0.0D);
+        assertEquals(ResolutionStatus.COMPLETE, acquisitionCost.status());
+        assertTrue(acquisitionCost.missingFactors().isEmpty());
+        assertEquals(2, acquisitionCost.notApplicableFactors().size());
+        assertEquals(1.0D, feasibility.coverage(), 0.0D);
+        assertEquals(ResolutionStatus.COMPLETE, feasibility.status());
+        assertTrue(feasibility.missingFactors().isEmpty());
+    }
+
+    @Test
     void applicableUnknownFactorsReduceCoverageButAreNotTreatedAsZero() {
         AcquisitionPath path = acquisitionPath("test:item", "test:loot", true, 1.0D,
             Map.of(
@@ -143,7 +192,8 @@ class DynamicFoodEngineTest {
 
     @Test
     void economicCostAcceptsUnboundedValuesWhileNormalizedFactorsRemainBounded() {
-        assertEquals(3.5D, new EconomicCostResolution(3.5D, 5.0D, ResolutionStatus.COMPLETE,
+        EconomicCost target = EconomicCost.known(3.5D, "test:primitive", 100, "test evidence");
+        assertEquals(3.5D, new EconomicCostResolution(target, null, ResolutionStatus.COMPLETE,
             100, null, List.of(), 1.0D, List.of()).economicCost(), 0.0D);
         assertEquals(3.5D, new ResourceEconomicProfile("test:ore", "test:ore", 3.5D,
             1.0D, 1.0D, true, true, SurvivalAcquirability.TRUE, false, false).economicCost(), 0.0D);
@@ -154,38 +204,210 @@ class DynamicFoodEngineTest {
     }
 
     @Test
-    void bestRepeatablePathUsesOneHorizonAndMonotonicDifficultyProjection() {
-        AcquisitionPath oneOff = acquisitionPath("test:item", "test:one_off", false, 1.0D,
+    void calibratedAdapterPreservesEconomicCostAndDoesNotDeriveDifficultyFromIt() {
+        DynamicFoodEngine engine = new DynamicFoodEngine();
+        engine.rebuildCalibration(List.of(
+            calibrationProfile("test:expensive_food", "test:expensive_food", 12.0D, 1.0D)),
+            FoodCalibrationSettings.defaults());
+
+        CalibratedBaseFoodValue value = engine.calibratedBaseFoodValue("test:expensive_food").orElseThrow();
+
+        assertEquals(12.0D, value.economicCost(), 0.0D);
+        assertEquals(0.0D, value.difficulty(), 0.0D);
+    }
+
+    @Test
+    void bestRepeatablePathUsesOnlyCompatiblePrimitiveAndDoesNotInferDifficulty() {
+        AcquisitionPath oneOff = withEconomicCost(acquisitionPath("test:item", "test:one_off", false, 1.0D,
             Map.of("reliability", EconomicFactor.known(1.0D)),
-            Map.of("quantity_cost", EconomicFactor.known(0.05D)), 100);
-        AcquisitionPath repeatable = acquisitionPath("test:item", "test:repeatable", true, 0.8D,
+            Map.of("quantity_cost", EconomicFactor.known(0.05D)), 100),
+            EconomicCost.known(0.05D, "test:units", 100, "independent test evidence"));
+        AcquisitionPath repeatable = withEconomicCost(acquisitionPath("test:item", "test:repeatable", true, 0.8D,
             Map.of("reliability", EconomicFactor.known(1.0D)),
-            Map.of("quantity_cost", EconomicFactor.known(0.4D)), 100);
-        AcquisitionPath mismatchedHorizon = acquisitionPath("test:item", "test:wrong_horizon", true, 1.0D,
+            Map.of("quantity_cost", EconomicFactor.known(0.95D)), 100),
+            EconomicCost.known(0.4D, "test:units", 100, "independent test evidence"));
+        AcquisitionPath mismatchedHorizon = withEconomicCost(acquisitionPath("test:item", "test:wrong_horizon", true, 1.0D,
             Map.of("reliability", EconomicFactor.known(1.0D)),
-            Map.of("quantity_cost", EconomicFactor.known(0.0D)), 10);
+            Map.of("quantity_cost", EconomicFactor.known(0.0D)), 10),
+            EconomicCost.known(0.01D, "test:units", 10, "independent test evidence"));
         EconomicCostResolution result = EconomicCostResolver.resolve("test:item",
             List.of(oneOff, mismatchedHorizon, repeatable), 100, PrimaryPathStrategy.BEST_REPEATABLE_COST,
             Map.of("reliability", 1.0D), Map.of("quantity_cost", 1.0D), 0.1D, 0.8D, false, false);
 
         assertEquals("test:repeatable", result.primaryPath().sourceId());
         assertEquals(0.4D, result.economicCost(), 0.0D);
-        assertEquals(2.0D, result.difficulty(), 0.0D);
+        assertEquals(0.95D, AcquisitionCostResolver.resolve(
+            repeatable.costsByHorizon().get(100), Map.of("quantity_cost", 1.0D)).cost(), 0.0D);
+        assertEquals(null, result.difficulty());
         assertEquals(100, result.economicHorizon());
-        assertTrue(result.alternatives().stream().noneMatch(path -> path.sourceId().equals("test:wrong_horizon")));
+        assertEquals(ResolutionStatus.PARTIAL, result.status());
+        assertTrue(result.alternatives().stream().anyMatch(path -> path.sourceId().equals("test:wrong_horizon")));
     }
 
     @Test
     void weightedAverageWithZeroFeasibilityReturnsUnknownInsteadOfNanCost() {
-        AcquisitionPath path = acquisitionPath("test:item", "test:zero", true, 1.0D,
+        AcquisitionPath path = withEconomicCost(acquisitionPath("test:item", "test:zero", true, 1.0D,
             Map.of("reliability", EconomicFactor.known(0.0D)),
-            Map.of("quantity_cost", EconomicFactor.known(0.5D)), 100);
+            Map.of("quantity_cost", EconomicFactor.known(0.5D)), 100),
+            EconomicCost.known(0.5D, "test:units", 100, "independent test evidence"));
         EconomicCostResolution result = EconomicCostResolver.resolve("test:item", List.of(path), 100,
             PrimaryPathStrategy.WEIGHTED_AVERAGE, Map.of("reliability", 1.0D),
             Map.of("quantity_cost", 1.0D), 0.0D, 0.8D, false, false);
 
         assertEquals(ResolutionStatus.UNKNOWN, result.status());
         assertEquals(null, result.economicCost());
+    }
+
+    @Test
+    void acquisitionDiagnosticsRemainAvailableWhenEconomicCostIsUnknown() {
+        AcquisitionPath path = acquisitionPath("test:item", "test:known_acquisition", true, 1.0D,
+            Map.of("reliability", EconomicFactor.known(1.0D)),
+            Map.of("quantity_cost", EconomicFactor.known(0.3D)), 100);
+        AcquisitionCost diagnostic = AcquisitionCostResolver.resolve(path.costsByHorizon().get(100),
+            Map.of("quantity_cost", 1.0D));
+        EconomicCostResolution result = EconomicCostResolver.resolve("test:item", List.of(path), 100,
+            PrimaryPathStrategy.MINIMUM_FEASIBLE, Map.of("reliability", 1.0D), 0.0D, 1.0D, true);
+
+        assertEquals(ResolutionStatus.COMPLETE, diagnostic.status());
+        assertEquals(0.3D, diagnostic.cost(), 0.0D);
+        assertEquals(ResolutionStatus.UNKNOWN, result.status());
+        assertEquals(null, result.target().value());
+        assertTrue(result.alternatives().contains(path));
+    }
+
+    @Test
+    void economicCostDoesNotCompareIncompatiblePrimitiveUnits() {
+        AcquisitionPath items = withEconomicCost(acquisitionPath("test:item", "test:items", true, 1.0D,
+            Map.of("reliability", EconomicFactor.known(1.0D)),
+            Map.of("quantity_cost", EconomicFactor.known(0.1D)), 100),
+            EconomicCost.known(1.0D, "test:item_count", 100, "count evidence"));
+        AcquisitionPath ticks = withEconomicCost(acquisitionPath("test:item", "test:ticks", true, 1.0D,
+            Map.of("reliability", EconomicFactor.known(1.0D)),
+            Map.of("quantity_cost", EconomicFactor.known(0.9D)), 100),
+            EconomicCost.known(10.0D, "test:processing_ticks", 100, "time evidence"));
+
+        EconomicCostResolution result = EconomicCostResolver.resolve("test:item", List.of(items, ticks), 100,
+            PrimaryPathStrategy.MINIMUM_FEASIBLE, Map.of("reliability", 1.0D), 0.0D, 1.0D, true);
+
+        assertEquals(ResolutionStatus.UNKNOWN, result.status());
+        assertEquals(null, result.target().value());
+        assertTrue(result.alternatives().size() == 2);
+    }
+
+    @Test
+    void weightedEconomicCostAggregationAvoidsOverflowForFiniteInputs() {
+        AcquisitionPath first = withEconomicCost(acquisitionPath("test:item", "test:first", true, 1.0D,
+            Map.of("reliability", EconomicFactor.known(1.0D)),
+            Map.of("quantity_cost", EconomicFactor.known(0.1D)), 100),
+            EconomicCost.known(Double.MAX_VALUE, "test:burden_units", 100, "finite measured cost"));
+        AcquisitionPath second = withEconomicCost(acquisitionPath("test:item", "test:second", true, 1.0D,
+            Map.of("reliability", EconomicFactor.known(1.0D)),
+            Map.of("quantity_cost", EconomicFactor.known(0.9D)), 100),
+            EconomicCost.known(Double.MAX_VALUE, "test:burden_units", 100, "finite measured cost"));
+
+        EconomicCostResolution result = EconomicCostResolver.resolve("test:item", List.of(first, second), 100,
+            PrimaryPathStrategy.WEIGHTED_AVERAGE, Map.of("reliability", 1.0D), 0.0D, 1.0D, false);
+        EconomicCostResolution median = EconomicCostResolver.resolve("test:item", List.of(first, second), 100,
+            PrimaryPathStrategy.MEDIAN_FEASIBLE, Map.of("reliability", 1.0D), 0.0D, 1.0D, false);
+
+        assertEquals(Double.MAX_VALUE, result.economicCost(), 0.0D);
+        assertEquals(ResolutionStatus.COMPLETE, result.status());
+        assertEquals(Double.MAX_VALUE, median.economicCost(), 0.0D);
+        assertEquals(ResolutionStatus.COMPLETE, median.status());
+    }
+
+    @Test
+    void economicCostScheduleChargesStartupOnceAndRecurringPerOutput() {
+        EconomicCostSchedule schedule = new EconomicCostSchedule(
+            EconomicCostComponent.known(50.0D, "test:burden_units", "measured initial setup"),
+            EconomicCostComponent.known(2.0D, "test:burden_units", "measured recurring burden per output"),
+            "both measurements use the same evidenced primitive");
+
+        for (int horizon : List.of(1, 10, 100)) {
+            EconomicCost result = schedule.resolve(horizon);
+            assertEquals(50.0D + 2.0D * horizon, result.value(), 0.0D);
+            assertEquals("test:burden_units", result.primitiveId());
+            assertEquals(horizon, result.observationHorizon());
+        }
+    }
+
+    @Test
+    void economicCostSchedulePreservesUnknownAndNotApplicableComponents() {
+        EconomicCostSchedule unknownStartup = new EconomicCostSchedule(
+            EconomicCostComponent.unknown("setup burden is not observable"),
+            EconomicCostComponent.known(2.0D, "test:burden_units", "recurring burden measured"),
+            "incomplete measurements");
+        EconomicCostSchedule noStartup = new EconomicCostSchedule(
+            EconomicCostComponent.notApplicable("mechanic has no separate setup"),
+            EconomicCostComponent.known(2.0D, "test:burden_units", "recurring burden measured"),
+            "recurring-only mechanic");
+        EconomicCostSchedule startupOnly = new EconomicCostSchedule(
+            EconomicCostComponent.known(50.0D, "test:burden_units", "one-time setup measured"),
+            EconomicCostComponent.notApplicable("no recurring burden"),
+            "startup-only mechanic");
+
+        for (int horizon : List.of(1, 10, 100)) {
+            assertEquals(null, unknownStartup.resolve(horizon).value());
+            assertEquals(2.0D * horizon, noStartup.resolve(horizon).value(), 0.0D);
+            assertEquals(50.0D, startupOnly.resolve(horizon).value(), 0.0D);
+        }
+    }
+
+    @Test
+    void economicCostScheduleRejectsIncompatibleUnitsAndInvalidHorizon() {
+        EconomicCostSchedule incompatible = new EconomicCostSchedule(
+            EconomicCostComponent.known(5.0D, "test:item_count", "setup items"),
+            EconomicCostComponent.known(2.0D, "test:ticks", "recurring processing time"),
+            "dimensions cannot be summed");
+
+        for (int horizon : List.of(1, 10, 100)) {
+            assertEquals(null, incompatible.resolve(horizon).value());
+        }
+        assertThrows(IllegalArgumentException.class, () -> incompatible.resolve(0));
+    }
+
+    @Test
+    void recursiveRecipeDividesOperationEconomicCostByOutputQuantity() {
+        RecipeGraph graph = new RecipeGraph();
+        List<RecipeNode> recipes = List.of(
+            recipeWithRawInput("test:single_output_recipe", "test:single_output", 1),
+            recipeWithRawInput("test:two_output_recipe", "test:two_outputs", 2),
+            recipeWithRawInput("test:four_output_recipe", "test:four_outputs", 4));
+        recipes.forEach(graph::add);
+        EconomicCostEvidenceProvider evidence = (itemId, horizon) -> itemId.equals("test:raw_material")
+            ? EconomicCost.known(10.0D, "test:burden_units", horizon, "measured operation input burden")
+            : EconomicCost.unknown("no evidence for " + itemId);
+        RecipeEconomicAnalyzer economics = new RecipeEconomicAnalyzer(graph, evidence);
+
+        assertEquals(10.0D, economics.resolve("test:single_output", 100).economicCost(), 0.0D);
+        assertEquals(5.0D, economics.resolve("test:two_outputs", 100).economicCost(), 0.0D);
+        assertEquals(2.5D, economics.resolve("test:four_outputs", 100).economicCost(), 0.0D);
+
+        RecipeGraphAcquisitionAnalyzer analyzer = new RecipeGraphAcquisitionAnalyzer(
+            graph, evidence, 1.0D, 100.0D);
+        for (int index = 0; index < recipes.size(); index++) {
+            AcquisitionPath path = analyzer.analyze(recipes.get(index).resultId()).getFirst();
+            assertEquals(List.of(10.0D, 5.0D, 2.5D).get(index), path.economicCost().value(), 0.0D);
+        }
+    }
+
+    @Test
+    void acquisitionPathAndResolverResolveScheduleAtRequestedHorizon() {
+        EconomicCostSchedule schedule = new EconomicCostSchedule(
+            EconomicCostComponent.known(50.0D, "test:burden_units", "initial setup"),
+            EconomicCostComponent.known(2.0D, "test:burden_units", "burden per output"),
+            "fixture uses measured compatible components");
+        AcquisitionPath path = withEconomicSchedule(acquisitionPath("test:item", "test:scheduled", true, 1.0D,
+            Map.of("reliability", EconomicFactor.known(1.0D)),
+            Map.of("quantity_cost", EconomicFactor.known(0.2D)), 100), schedule);
+
+        for (int horizon : List.of(1, 10, 100)) {
+            EconomicCostResolution result = EconomicCostResolver.resolve("test:item", List.of(path), horizon,
+                PrimaryPathStrategy.BEST_REPEATABLE_COST, Map.of("reliability", 1.0D), 0.0D, 1.0D, false);
+
+            assertEquals(50.0D + 2.0D * horizon, result.economicCost(), 0.0D);
+            assertEquals(horizon, result.target().observationHorizon());
+        }
     }
 
     @Test
@@ -265,12 +487,28 @@ class DynamicFoodEngineTest {
         SurvivalAcquirabilityResolver resolver = new SurvivalAcquirabilityResolver();
         AcquisitionPath recipe = new AcquisitionPath("examplemod:diamond", "recipe", "examplemod:diamond",
             1.0D, null, null, true, false, Map.of(), Map.of());
+        AcquisitionPath worldgen = new AcquisitionPath("examplemod:ore", "worldgen_feature", "examplemod:ore",
+            1.0D, null, null, true, false, Map.of(), Map.of(),
+            new AcquisitionEvidence(Map.of(), Map.of("source_availability_classification", "TRUE")));
+        List<AcquisitionPath> discoveredButUnverified = List.of(
+            new AcquisitionPath("examplemod:wheat", "crop", "examplemod:wheat",
+                1.0D, null, null, true, false, Map.of(), Map.of(),
+                new AcquisitionEvidence(Map.of(), Map.of("source_availability_classification", "UNKNOWN"))),
+            new AcquisitionPath("examplemod:trade_food", "villager_trade", "examplemod:trade",
+                1.0D, null, null, true, false, Map.of(), Map.of(),
+                new AcquisitionEvidence(Map.of(), Map.of("source_availability_classification", "UNKNOWN"))),
+            new AcquisitionPath("examplemod:ore", "worldgen_feature", "examplemod:ore",
+                1.0D, null, null, true, false, Map.of(), Map.of(),
+                new AcquisitionEvidence(Map.of(), Map.of("source_availability_classification", "UNKNOWN")))
+        );
         AcquisitionPath eventOnly = new AcquisitionPath("examplemod:event_food", "event_only", "examplemod:event",
             1.0D, null, null, false, false, Map.of(), Map.of());
         AcquisitionPath custom = new AcquisitionPath("examplemod:custom", "custom_source", "examplemod:custom",
             1.0D, null, null, null, false, Map.of(), Map.of());
 
-        assertEquals(SurvivalAcquirability.TRUE, resolver.resolve(List.of(recipe)).state());
+        assertEquals(SurvivalAcquirability.UNKNOWN, resolver.resolve(List.of(recipe)).state());
+        assertEquals(SurvivalAcquirability.UNKNOWN, resolver.resolve(discoveredButUnverified).state());
+        assertEquals(SurvivalAcquirability.TRUE, resolver.resolve(List.of(worldgen)).state());
         assertEquals(SurvivalAcquirability.FALSE, resolver.resolve(List.of(eventOnly)).state());
         assertEquals(SurvivalAcquirability.UNKNOWN, resolver.resolve(List.of(custom)).state());
         assertEquals(SurvivalAcquirability.UNKNOWN, resolver.resolve(List.of()).state());
@@ -290,7 +528,7 @@ class DynamicFoodEngineTest {
     }
 
     @Test
-    void recipeEconomicAnalyzerUsesCurrentAssemblyEconomicsAndHandlesCycles() {
+    void configuredCostMapsDoNotCreateRecipeTerminalValuesAndCyclesRemainUnknown() {
         RecipeGraph graph = new RecipeGraph();
         graph.add(new RecipeNode("test:dirt_to_diamond", "minecraft:crafting", "examplemod:diamond", 1,
             List.of(IngredientContribution.of("examplemod:dirt", 0.0D, 0.0D, 1, true))));
@@ -299,15 +537,55 @@ class DynamicFoodEngineTest {
         graph.add(new RecipeNode("test:b_from_a", "minecraft:crafting", "examplemod:b", 1,
             List.of(IngredientContribution.of("examplemod:a", 0.0D, 0.0D, 1, true))));
         RecipeEconomicAnalyzer analyzer = new RecipeEconomicAnalyzer(graph,
-            Map.of("examplemod:dirt", 0.05D, "minecraft:diamond", 0.95D), 1.0D, 100.0D);
+            EconomicCostEvidenceProvider.unknown());
 
-        RecipeEconomicResult cheapDiamond = analyzer.resolve("examplemod:diamond");
-        RecipeEconomicResult cycle = analyzer.resolve("examplemod:a");
+        RecipeEconomicResult diamond = analyzer.resolve("examplemod:diamond", 100);
+        RecipeEconomicResult cycle = analyzer.resolve("examplemod:a", 100);
 
-        assertTrue(cheapDiamond.economicCost() < 0.95D);
-        assertEquals("test:dirt_to_diamond", cheapDiamond.recipePath().getFirst());
+        assertEquals(ResolutionStatus.UNKNOWN, diamond.status());
+        assertEquals(null, diamond.economicCost());
+        assertTrue(!diamond.missingInputs().isEmpty());
         assertEquals(ResolutionStatus.UNKNOWN, cycle.status());
         assertTrue(!cycle.detectedCycles().isEmpty());
+    }
+
+    @Test
+    void sharedCyclicRecipeBranchesAreMemoizedInsteadOfExpandingEveryPath() {
+        RecipeGraph graph = new RecipeGraph();
+        for (int level = 0; level < 18; level++) {
+            String result = "examplemod:branch_" + level;
+            String input = "examplemod:branch_" + (level + 1);
+            graph.add(new RecipeNode("test:first_" + level, "minecraft:crafting", result, 1,
+                List.of(), null, List.of(new AcquisitionIngredient(List.of(input), 1))));
+            graph.add(new RecipeNode("test:second_" + level, "minecraft:crafting", result, 1,
+                List.of(), null, List.of(new AcquisitionIngredient(List.of(input), 1))));
+        }
+        graph.add(new RecipeNode("test:cycle", "minecraft:crafting", "examplemod:branch_18", 1,
+            List.of(), null,
+            List.of(new AcquisitionIngredient(List.of("examplemod:branch_0"), 1))));
+
+        RecipeEconomicResult result = new RecipeEconomicAnalyzer(graph,
+            EconomicCostEvidenceProvider.unknown()).resolve("examplemod:branch_0", 100);
+
+        assertEquals(ResolutionStatus.UNKNOWN, result.status());
+        assertTrue(!result.detectedCycles().isEmpty());
+    }
+
+    @Test
+    void engineProfilesNeverBecomeAutomaticRecipeTerminalValues() {
+        DynamicFoodEngine engine = new DynamicFoodEngine();
+        engine.rebuildCalibration(List.of(calibrationProfile("examplemod:dirt", "examplemod:dirt",
+            0.05D, 1.0D)), FoodCalibrationSettings.defaults());
+        engine.replaceStaticRecipes(List.of(new RecipeNode("test:dirt_to_diamond", "minecraft:crafting",
+            "examplemod:diamond", 1,
+            List.of(IngredientContribution.of("examplemod:dirt", 0.0D, 0.0D, 1, true)))));
+
+        RecipeEconomicResult recursive = engine.recipeEconomicResult("examplemod:diamond");
+        List<AcquisitionPath> paths = engine.acquisitionPaths("examplemod:diamond");
+
+        assertEquals(ResolutionStatus.UNKNOWN, recursive.status());
+        assertTrue(paths.stream().anyMatch(path -> path.sourceId().equals("test:dirt_to_diamond")));
+        assertTrue(paths.stream().allMatch(path -> !path.economicCost().isKnown()));
     }
 
     @Test
@@ -317,31 +595,34 @@ class DynamicFoodEngineTest {
             "examplemod:meal", 1, List.of(), null,
             List.of(new AcquisitionIngredient(List.of("minecraft:dirt"), 1))));
         RecipeEconomicResult result = new RecipeEconomicAnalyzer(graph,
-            Map.of("minecraft:dirt", 0.05D), 1.0D, 100.0D).resolve("examplemod:meal");
+            EconomicCostEvidenceProvider.unknown()).resolve("examplemod:meal", 100);
 
-        assertEquals(ResolutionStatus.COMPLETE, result.status());
+        assertEquals(ResolutionStatus.UNKNOWN, result.status());
         assertEquals("test:technical_input_to_food", result.recipePath().getFirst());
-        assertNotNull(result.economicCost());
+        assertEquals(null, result.economicCost());
     }
 
     @Test
-    void recursiveRecipeEconomicsRetainRawMagnitudeUntilFinalFactorNormalization() {
+    void recursiveRecipeEconomicsDoNotNormalizeChildEconomicCostAgain() {
         RecipeGraph graph = new RecipeGraph();
         graph.add(new RecipeNode("test:ore_to_ingot", "minecraft:crafting", "examplemod:ingot", 1,
             List.of(), null, List.of(new AcquisitionIngredient(List.of("examplemod:ore"), 2))));
         graph.add(new RecipeNode("test:ingot_to_plate", "minecraft:crafting", "examplemod:plate", 2,
             List.of(), 600.0D, List.of(new AcquisitionIngredient(List.of("examplemod:ingot"), 3))));
-        RecipeEconomicAnalyzer economics = new RecipeEconomicAnalyzer(graph,
-            Map.of("examplemod:ore", 4.0D), 1.0D, 100.0D);
+        EconomicCostEvidenceProvider oreEvidence = (itemId, horizon) -> itemId.equals("examplemod:ore")
+            ? EconomicCost.known(4.0D, "test:resource_units", horizon, "independent ore primitive")
+            : EconomicCost.unknown("no evidence for " + itemId);
+        RecipeEconomicAnalyzer economics = new RecipeEconomicAnalyzer(graph, oreEvidence);
 
-        RecipeEconomicResult rawResult = economics.resolve("examplemod:plate");
+        RecipeEconomicResult rawResult = economics.resolve("examplemod:plate", 100);
         AcquisitionPath path = new RecipeGraphAcquisitionAnalyzer(graph,
-            Map.of("examplemod:ore", 4.0D), 1.0D, 100.0D).analyze("examplemod:plate").getFirst();
+            oreEvidence, 1.0D, 100.0D).analyze("examplemod:plate").getFirst();
 
         assertEquals(12.0D, rawResult.economicCost(), 0.0D);
         assertEquals(12.0D, path.evidence().measurements().get("material_cost_per_output").value(), 0.0D);
-        assertEquals(FactorNormalizer.logarithmic(1200.0D, 1.0D, 100.0D),
-            path.costsByHorizon().get(100).factors().get("material_cost"));
+        assertTrue(path.economicCost().isKnown());
+        assertEquals(12.0D, path.economicCost().value(), 0.0D);
+        assertTrue(path.costsByHorizon().get(100).factors().get("material_cost").isNotApplicable());
         assertEquals(FactorNormalizer.logarithmic(30000.0D, 200.0D, 72000.0D),
             path.costsByHorizon().get(100).factors().get("time_cost"));
     }
@@ -351,14 +632,14 @@ class DynamicFoodEngineTest {
         RecipeGraph graph = new RecipeGraph();
         graph.add(new RecipeNode("test:tag_recipe", "minecraft:crafting", "examplemod:meal", 1,
             List.of(IngredientContribution.of("dynamicfood:ingredient_alternatives", 1.0D, 0.0D, 1, true))));
-        RecipeEconomicResult result = new RecipeEconomicAnalyzer(graph, Map.of("examplemod:seed", 0.1D), 1.0D, 100.0D)
-            .resolve("examplemod:meal");
+        RecipeEconomicResult result = new RecipeEconomicAnalyzer(graph, EconomicCostEvidenceProvider.unknown())
+            .resolve("examplemod:meal", 100);
 
         assertEquals(ResolutionStatus.UNKNOWN, result.status());
         assertEquals(null, result.economicCost());
         assertTrue(!result.missingInputs().isEmpty());
         List<AcquisitionPath> acquisitionPaths = new RecipeGraphAcquisitionAnalyzer(graph,
-            Map.of("examplemod:seed", 0.1D), 1.0D, 100.0D).analyze("examplemod:meal");
+            EconomicCostEvidenceProvider.unknown(), 1.0D, 100.0D).analyze("examplemod:meal");
         assertEquals(1, acquisitionPaths.size());
         assertTrue(!acquisitionPaths.getFirst().costsByHorizon().get(100)
             .factors().get("material_cost").isKnown());
@@ -370,7 +651,9 @@ class DynamicFoodEngineTest {
         graph.add(new RecipeNode("testmod:berry_to_food", "minecraft:crafting", "testmod:berry_food", 1,
             List.of(IngredientContribution.of("testmod:berry", 0.0D, 0.0D, 2, true))));
         RecipeGraphAcquisitionAnalyzer analyzer = new RecipeGraphAcquisitionAnalyzer(graph,
-            Map.of("testmod:berry", 0.2D), 1.0D, 100.0D);
+            (itemId, horizon) -> itemId.equals("testmod:berry")
+                ? EconomicCost.known(0.2D, "test:resource_units", horizon, "test primitive")
+                : EconomicCost.unknown("no evidence for " + itemId), 1.0D, 100.0D);
 
         List<AcquisitionPath> paths = analyzer.analyze("testmod:berry_food");
 
@@ -378,8 +661,9 @@ class DynamicFoodEngineTest {
         assertEquals(1, paths.size());
         assertEquals("testmod:berry_to_food", paths.getFirst().sourceId());
         assertEquals("recipe", paths.getFirst().sourceType());
-        assertEquals(FactorNormalizer.logarithmic(40.0D, 1.0D, 100.0D).value(), paths.getFirst()
-            .costsByHorizon().get(100).factors().get("material_cost").value(), 0.0001D);
+        assertEquals(0.4D, paths.getFirst().economicCost().value(), 0.0001D);
+        assertTrue(paths.getFirst().costsByHorizon().get(100)
+            .factors().get("material_cost").isNotApplicable());
     }
 
     @Test
@@ -388,7 +672,7 @@ class DynamicFoodEngineTest {
         graph.add(new RecipeNode("testmod:cooked_meal", "minecraft:smelting", "testmod:meal", 2,
             List.of(IngredientContribution.of("testmod:raw_food", 1.0D, 0.2D, 1, true)), 600.0D));
         RecipeGraphAcquisitionAnalyzer analyzer = new RecipeGraphAcquisitionAnalyzer(graph,
-            Map.of("testmod:raw_food", 0.2D), 1.0D, 100.0D, 1.0D, 10000.0D, 200.0D, 72000.0D);
+            EconomicCostEvidenceProvider.unknown(), 1.0D, 100.0D, 1.0D, 10000.0D, 200.0D, 72000.0D);
 
         AcquisitionPath path = analyzer.analyze("testmod:meal").getFirst();
         CostVector vector = path.costsByHorizon().get(100);
@@ -407,7 +691,8 @@ class DynamicFoodEngineTest {
         RecipeGraph graph = new RecipeGraph();
         graph.add(new RecipeNode("testmod:unknown_recipe", "minecraft:crafting", "testmod:output", 1,
             List.of(IngredientContribution.of("testmod:unknown_input", 0.0D, 0.0D, 1, true))));
-        RecipeGraphAcquisitionAnalyzer analyzer = new RecipeGraphAcquisitionAnalyzer(graph, Map.of(), 1.0D, 100.0D);
+        RecipeGraphAcquisitionAnalyzer analyzer = new RecipeGraphAcquisitionAnalyzer(graph,
+            EconomicCostEvidenceProvider.unknown(), 1.0D, 100.0D);
 
         List<AcquisitionPath> paths = analyzer.analyze("testmod:output");
         assertEquals(1, paths.size());
@@ -501,6 +786,15 @@ class DynamicFoodEngineTest {
         assertEquals(0.5D, path.evidence().measurement("expected_units_per_attempt").value(), 1.0E-12D);
         assertEquals(FactorNormalizer.quantityCostForHorizon(0.5D, 100, 1.0D, 100.0D),
             path.costsByHorizon().get(100).factors().get("quantity_cost"));
+        assertTrue(path.feasibilityFactors().get("probability").isNotApplicable());
+        assertTrue(path.feasibilityFactors().get("expected_yield").isNotApplicable());
+        FeasibilityResult feasibility = FeasibilityResolver.resolve(path,
+            Map.of("probability", 1.0D, "expected_yield", 1.0D, "reliability", 1.0D),
+            1.0D, 0.0D, false);
+        assertEquals(ResolutionStatus.COMPLETE, feasibility.status());
+        assertEquals(1.0D, feasibility.coverage(), 0.0D);
+        assertEquals(1.0D, feasibility.feasibility(), 0.0D);
+        assertEquals(2, feasibility.notApplicableFactors().size());
 
         AcquisitionCost combined = AcquisitionCostResolver.resolve(path.costsByHorizon().get(100),
             Map.of("quantity_cost", 1.0D, "probability_cost", 1.0D, "yield_cost", 1.0D));
@@ -517,7 +811,11 @@ class DynamicFoodEngineTest {
         graph.add(new RecipeNode("examplemod:craft_from_berry", "minecraft:crafting", "examplemod:meal", 2,
             List.of(IngredientContribution.of("examplemod:berry", 0.0D, 0.0D, 2, true))));
         RecipeGraphAcquisitionAnalyzer analyzer = new RecipeGraphAcquisitionAnalyzer(graph,
-            Map.of("examplemod:seed", 0.2D, "examplemod:berry", 0.1D), 1.0D, 100.0D);
+            (itemId, horizon) -> switch (itemId) {
+                case "examplemod:seed" -> EconomicCost.known(0.2D, "test:resource_units", horizon, "test seed primitive");
+                case "examplemod:berry" -> EconomicCost.known(0.1D, "test:resource_units", horizon, "test berry primitive");
+                default -> EconomicCost.unknown("no evidence for " + itemId);
+            }, 1.0D, 100.0D);
 
         List<AcquisitionPath> paths = analyzer.analyze("examplemod:meal");
 
@@ -576,7 +874,7 @@ class DynamicFoodEngineTest {
     }
 
     @Test
-    void recipeEconomicCycleDoesNotPoisonIndependentAlternativePathCache() {
+    void unresolvedCyclicRecipeAlternativeKeepsEconomicCostUnknown() {
         RecipeGraph graph = new RecipeGraph();
         graph.add(new RecipeNode("test:a_from_b", "minecraft:crafting", "examplemod:a", 1,
             List.of(IngredientContribution.of("examplemod:b", 0.0D, 0.0D, 1, true))));
@@ -585,14 +883,17 @@ class DynamicFoodEngineTest {
         graph.add(new RecipeNode("test:b_from_a", "minecraft:crafting", "examplemod:b", 1,
             List.of(IngredientContribution.of("examplemod:a", 0.0D, 0.0D, 1, true))));
         RecipeEconomicAnalyzer analyzer = new RecipeEconomicAnalyzer(graph,
-            Map.of("examplemod:seed", 0.2D), 1.0D, 100.0D);
+            (itemId, horizon) -> itemId.equals("examplemod:seed")
+                ? EconomicCost.known(0.2D, "test:resource_units", horizon, "independent seed primitive")
+                : EconomicCost.unknown("no evidence for " + itemId));
 
-        RecipeEconomicResult resultA = analyzer.resolve("examplemod:a");
-        RecipeEconomicResult resultB = analyzer.resolve("examplemod:b");
+        RecipeEconomicResult resultA = analyzer.resolve("examplemod:a", 100);
+        RecipeEconomicResult resultB = analyzer.resolve("examplemod:b", 100);
 
-        assertEquals(ResolutionStatus.COMPLETE, resultA.status());
-        assertEquals(ResolutionStatus.COMPLETE, resultB.status());
-        assertTrue(resultB.economicCost() != null);
+        assertEquals(ResolutionStatus.UNKNOWN, resultA.status());
+        assertEquals(ResolutionStatus.UNKNOWN, resultB.status());
+        assertEquals(null, resultA.economicCost());
+        assertTrue(!resultA.detectedCycles().isEmpty());
     }
 
     @Test
@@ -1425,11 +1726,29 @@ class DynamicFoodEngineTest {
             true, true, SurvivalAcquirability.TRUE, false, false);
     }
 
+    private static RecipeNode recipeWithRawInput(String recipeId, String resultId, int outputCount) {
+        return new RecipeNode(recipeId, "minecraft:crafting", resultId, outputCount, List.of(), null,
+            List.of(new AcquisitionIngredient(List.of("test:raw_material"), 1)));
+    }
+
     private static AcquisitionPath acquisitionPath(String itemId, String sourceId, boolean repeatable,
         double confidence, Map<String, EconomicFactor> feasibilityFactors, Map<String, EconomicFactor> costFactors,
         int horizon) {
         return new AcquisitionPath(itemId, "test", sourceId, confidence, repeatable ? 1.0D : 0.0D,
             0.0D, repeatable, false, feasibilityFactors,
             Map.of(horizon, new CostVector(horizon, costFactors)));
+    }
+
+    private static AcquisitionPath withEconomicCost(AcquisitionPath path, EconomicCost economicCost) {
+        return new AcquisitionPath(path.itemId(), path.sourceType(), path.sourceId(), path.confidence(),
+            path.renewability(), path.risk(), path.repeatable(), path.hardFailed(), path.feasibilityFactors(),
+            path.costsByHorizon(), path.evidence(), economicCost);
+    }
+
+    private static AcquisitionPath withEconomicSchedule(AcquisitionPath path, EconomicCostSchedule schedule) {
+        return new AcquisitionPath(path.itemId(), path.sourceType(), path.sourceId(), path.confidence(),
+            path.renewability(), path.risk(), path.repeatable(), path.hardFailed(), path.feasibilityFactors(),
+            path.costsByHorizon(), path.evidence(),
+            EconomicCost.unknown("schedule resolves value at requested horizon"), schedule);
     }
 }

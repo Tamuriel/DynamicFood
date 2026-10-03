@@ -5,8 +5,6 @@ import com.jorjik.dynamicfood.compat.OptionalTransactionSupport;
 import com.jorjik.dynamicfood.core.CalibrationAnchor;
 import com.jorjik.dynamicfood.core.FoodCalibrationSettings;
 import com.jorjik.dynamicfood.core.DynamicFoodEngine;
-import com.jorjik.dynamicfood.core.EconomicFactor;
-import com.jorjik.dynamicfood.core.FactorNormalizer;
 import com.jorjik.dynamicfood.core.IngredientContribution;
 import com.jorjik.dynamicfood.core.ResourceEconomicProfile;
 import com.jorjik.dynamicfood.core.SurvivalAcquirability;
@@ -350,6 +348,7 @@ public final class DynamicFoodConsumptionGameTest {
         List<AcquisitionPath> cod = DynamicFood.ENGINE.acquisitionPaths("minecraft:cod");
         List<AcquisitionPath> goldenApple = DynamicFood.ENGINE.acquisitionPaths("minecraft:golden_apple");
         List<AcquisitionPath> coalOre = DynamicFood.ENGINE.acquisitionPaths("minecraft:coal_ore");
+        List<AcquisitionPath> coal = DynamicFood.ENGINE.acquisitionPaths("minecraft:coal");
 
         helper.assertTrue(wheat.stream().anyMatch(path -> path.sourceType().equals("crop")),
             "wheat block loot must be indexed as a crop source; observed types="
@@ -361,18 +360,55 @@ public final class DynamicFoodConsumptionGameTest {
             "fishing loot must be indexed as a fishing source");
         helper.assertTrue(goldenApple.stream().anyMatch(path -> path.sourceType().equals("worldgen")),
             "chest loot must be indexed as a worldgen source");
-        helper.assertTrue(wheat.stream().filter(path -> path.sourceType().equals("crop"))
-            .allMatch(path -> path.evidence().measurements().get("crop_max_age") != null
-                && path.evidence().measurements().get("crop_growth_time_ticks") != null
-                && path.evidence().measurements().get("crop_seed_return_per_cycle") != null),
-            "crop paths must expose version-verified max age and explicit unknown growth/seed-loop measurements");
-        helper.assertTrue(coalOre.stream().anyMatch(path -> path.sourceType().equals("worldgen_feature")),
-            "vanilla coal ore must retain its discovered worldgen acquisition path");
-        helper.assertTrue(coalOre.stream().filter(path -> path.sourceType().equals("worldgen_feature"))
+        List<AcquisitionPath> invalidCropPaths = wheat.stream()
+                .filter(path -> path.sourceType().equals("crop"))
+                .filter(path -> path.evidence().measurements().get("crop_max_age") == null
+                    || path.evidence().measurements().get("crop_growth_time_ticks") == null
+                    || path.evidence().measurements().get("crop_seed_return_per_cycle") == null
+                    || path.evidence().measurements().get("crop_seeds_required_per_cycle") == null
+                    || path.evidence().measurements().get("crop_external_seed_input_per_cycle") == null
+                    || path.evidence().measurement("crop_growth_time_ticks").isKnown()
+                    || path.evidence().measurement("crop_seed_return_per_cycle").isKnown()
+                    || path.evidence().measurement("crop_external_seed_input_per_cycle").isKnown()
+                    || !"UNKNOWN: seed return and replant requirement are unresolved".equals(
+                        path.evidence().attributes().get("seed_renewal_state"))
+                    || !"item per loot-table invocation".equals(
+                        path.evidence().attributes().get("canonical_quantity_unit")))
+                .toList();
+        helper.assertTrue(invalidCropPaths.isEmpty(),
+                "crop paths must separate loot invocation quantity from unresolved growth and replanting cycle evidence: "
+                    + invalidCropPaths.stream().map(path -> path.sourceId() + " "
+                        + path.evidence().measurements() + " " + path.evidence().attributes()).toList());
+        List<AcquisitionPath> coalOreWorldgen = java.util.stream.Stream.concat(coalOre.stream(), coal.stream())
+            .filter(path -> path.sourceType().equals("worldgen_feature")
+                && "minecraft:coal_ore".equals(path.evidence().attributes().get("worldgen_block_id")))
+            .toList();
+        helper.assertTrue(!coalOreWorldgen.isEmpty(),
+            "vanilla coal ore worldgen evidence must link to its block-break output paths");
+        helper.assertTrue(coalOreWorldgen.stream()
             .allMatch(path -> path.costsByHorizon().get(100).factors().get("quantity_cost").isUnknown()
-                && path.costsByHorizon().get(100).factors().get("material_cost").isNotApplicable()
-                && path.costsByHorizon().get(100).factors().get("equipment_cost").isUnknown()),
-            "worldgen must preserve measurable evidence while distinguishing inapplicable inputs from unknown mining costs");
+                && path.costsByHorizon().get(100).factors().get("equipment_cost").isUnknown()
+                && !path.economicCost().isKnown()
+                && path.evidence().measurement("expected_units_per_attempt") != null
+                && !path.evidence().measurement("expected_units_per_attempt").isKnown()
+                && path.evidence().attributes().get("canonical_quantity_unit")
+                    .equals("item per block-break loot invocation")
+                && path.evidence().attributes().get("block_loot_table")
+                    .equals("minecraft:blocks/coal_ore")
+                && path.evidence().attributes().get("survival_availability").startsWith("unknown:")),
+            "worldgen paths must use the registered block loot table while leaving conditional extraction and accessibility unresolved");
+        helper.assertTrue(DynamicFood.ENGINE.survivalAcquirability("minecraft:wheat").state()
+                == SurvivalAcquirability.UNKNOWN
+            && DynamicFood.ENGINE.survivalAcquirability("minecraft:coal").state()
+                == SurvivalAcquirability.UNKNOWN,
+            "crop and worldgen discovery evidence must not become survival TRUE without explicit availability evidence");
+        List<AcquisitionPath> cake = DynamicFood.ENGINE.acquisitionPaths("minecraft:cake");
+        helper.assertTrue(cake.stream().filter(path -> path.sourceId().equals("minecraft:cake"))
+            .anyMatch(path -> path.evidence().attributes().entrySet().stream().anyMatch(entry ->
+            entry.getValue().contains("minecraft:milk_bucket")
+                && path.evidence().attributes().get(entry.getKey().replace("_alternatives", "_use"))
+                    .equals("unknown"))),
+            "milk buckets with a different crafting remainder must remain an unresolved reusable-input cost");
         helper.succeed();
     }
 
@@ -391,42 +427,55 @@ public final class DynamicFoodConsumptionGameTest {
     public static void villagerTradeIndexCapturesFixedListingsAndKeepsUnknownCosts(GameTestHelper helper) {
         VillagerTrades.ItemListing supportedModListing = new BasicItemListing(
             new ItemStack(Items.EMERALD), new ItemStack(Items.BREAD, 2), 12, 1, 0.05F);
+        VillagerTrades.ItemListing multipleInputListing = new BasicItemListing(
+            new ItemStack(Items.EMERALD, 2), new ItemStack(Items.BREAD, 3),
+            new ItemStack(Items.BAKED_POTATO, 2), 12, 1, 0.05F);
         VillagerTrades.ItemListing unsupportedListing = (entity, random) -> null;
         Map<Integer, List<VillagerTrades.ItemListing>> trades = Map.of(1, List.of(
             supportedModListing,
             new VillagerTrades.ItemsForEmeralds(Items.APPLE, 1, 1, 12),
+            multipleInputListing,
             unsupportedListing
         ));
         VillagerTradeAcquisitionAnalyzer analyzer =
             VillagerTradeAcquisitionAnalyzer.empty().withProfession("minecraft:farmer", trades);
-        VillagerTradeAcquisitionAnalyzer pricedAnalyzer = analyzer.withInputCosts(Map.of("minecraft:emerald", 0.5D));
         DynamicFoodEngine engine = new DynamicFoodEngine();
         engine.replaceVillagerTradeListings("minecraft:farmer", trades);
 
         List<AcquisitionPath> breadPaths = engine.acquisitionPaths("minecraft:bread");
         List<AcquisitionPath> applePaths = engine.acquisitionPaths("minecraft:apple");
+        List<AcquisitionPath> potatoPaths = engine.acquisitionPaths("minecraft:baked_potato");
         helper.assertTrue(breadPaths.size() == 1
             && breadPaths.getFirst().sourceType().equals("villager_trade")
             && breadPaths.getFirst().sourceId().equals("minecraft:farmer/level_1/listing_0"),
             "fixed NeoForge BasicItemListing output must have a deterministic source path");
         helper.assertTrue(breadPaths.getFirst().costsByHorizon().get(100)
             .factors().get("quantity_cost").isKnown()
+            && breadPaths.getFirst().feasibilityFactors().get("probability").isNotApplicable()
+            && breadPaths.getFirst().feasibilityFactors().get("expected_yield").isNotApplicable()
             && !breadPaths.getFirst().costsByHorizon().get(100).factors().get("material_cost").isKnown()
             && breadPaths.getFirst().evidence().measurement("output_quantity_per_completed_offer").value() == 2.0D
             && breadPaths.getFirst().evidence().measurement("input_quantity:minecraft:emerald").value() == 1.0D
+            && !breadPaths.getFirst().evidence()
+                .measurement("input_economic_cost:minecraft:emerald").isKnown()
             && breadPaths.getFirst().evidence().measurement("maximum_uses").value() == 12.0D
             && breadPaths.getFirst().evidence().attributes().get("price_model")
-                .contains("demand, reputation"),
+                .contains("demand, reputation")
+            && !breadPaths.getFirst().evidence().measurement("progression_gate").isKnown()
+            && !breadPaths.getFirst().evidence().measurement("restock_dependency").isKnown(),
             "observed trade output, inputs and restock limits must be retained while unknown input prices stay unknown");
         helper.assertTrue(applePaths.size() == 1
             && applePaths.getFirst().sourceId().equals("minecraft:farmer/level_1/listing_1")
             && applePaths.getFirst().evidence().measurement("input_quantity:minecraft:emerald").value() == 1.0D,
             "the verified vanilla trade must retain its base emerald input without invoking its Entity-dependent offer");
-        EconomicFactor pricedMaterial = pricedAnalyzer.analyze("minecraft:bread").getFirst()
-            .costsByHorizon().get(100).factors().get("material_cost");
-        helper.assertTrue(pricedMaterial.isKnown()
-            && Math.abs(pricedMaterial.value() - FactorNormalizer.logarithmic(25.0D, 1.0D, 100.0D).value()) < 0.0001D,
-            "known input economics must be recursively counted and normalized for the requested output horizon");
+        helper.assertTrue(potatoPaths.size() == 1
+            && potatoPaths.getFirst().evidence().measurement("input_quantity:minecraft:emerald").value() == 2.0D
+            && potatoPaths.getFirst().evidence().measurement("input_quantity:minecraft:bread").value() == 3.0D
+            && potatoPaths.getFirst().evidence().measurement("output_quantity_per_completed_offer").value() == 2.0D
+            && !potatoPaths.getFirst().evidence()
+                .measurement("input_economic_cost:minecraft:bread").isKnown()
+            && potatoPaths.getFirst().costsByHorizon().get(100).factors().get("material_cost").isUnknown(),
+            "multiple inputs retain exact quantities while unresolved recursive trade inputs remain unknown, not free");
         helper.assertTrue(analyzer.unindexedListingCount() == 1,
             "unsupported Java-only ItemListing implementations must remain visible as unindexed");
         helper.assertTrue(DynamicFood.ENGINE.acquisitionPaths("minecraft:bread").stream()

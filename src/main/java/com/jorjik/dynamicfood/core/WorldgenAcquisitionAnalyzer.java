@@ -26,6 +26,11 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
     }
 
     public static WorldgenAcquisitionAnalyzer fromResourceManager(ResourceManager resourceManager) {
+        return fromResourceManager(resourceManager, null);
+    }
+
+    public static WorldgenAcquisitionAnalyzer fromResourceManager(ResourceManager resourceManager,
+        LootTableAcquisitionAnalyzer lootAnalyzer) {
         Map<String, JsonObject> jsonResources = new HashMap<>();
         for (String directory : List.of("worldgen/biome", "worldgen/placed_feature",
             "worldgen/configured_feature", "worldgen/dimension",
@@ -35,13 +40,17 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 .forEach(entry -> parseResource(entry.getKey(), entry.getValue())
                     .ifPresent(json -> jsonResources.put(entry.getKey().toString(), json)));
         }
-        return fromJsonResources(jsonResources);
+        return fromBlockSources(discoverBlockSources(jsonResources), lootAnalyzer);
     }
 
     public static WorldgenAcquisitionAnalyzer fromJsonResources(Map<String, JsonObject> jsonResources) {
-        Map<String, List<WorldgenBlockSource>> discovered = discoverBlockSources(jsonResources);
-        Map<String, List<WorldgenSource>> indexed = new HashMap<>();
-        discovered.forEach((blockId, sources) -> {
+        return fromBlockSources(discoverBlockSources(jsonResources), null);
+    }
+
+    static WorldgenAcquisitionAnalyzer fromBlockSources(
+        Map<String, List<WorldgenBlockSource>> discovered, LootTableAcquisitionAnalyzer lootAnalyzer) {
+        Map<String, BlockExtraction> extractionByBlock = new HashMap<>();
+        discovered.keySet().forEach(blockId -> {
             ResourceLocation blockLocation = ResourceLocation.tryParse(blockId);
             if (blockLocation == null) {
                 return;
@@ -55,14 +64,56 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 return;
             }
             String itemId = BuiltInRegistries.ITEM.getKey(item).toString();
-            sources.forEach(source -> indexed.computeIfAbsent(itemId, ignored -> new ArrayList<>())
-                .add(new WorldgenSource(source.sourceId(), source.biomeId(), source.placedFeatureId(), blockId,
-                    source.measurements(), source.attributes())));
+            extractionByBlock.put(blockId,
+                new BlockExtraction(itemId, block.getLootTable().location().toString()));
+        });
+        return fromResolvedBlockSources(discovered, extractionByBlock, lootAnalyzer);
+    }
+
+    static WorldgenAcquisitionAnalyzer fromResolvedBlockSources(
+        Map<String, List<WorldgenBlockSource>> discovered,
+        Map<String, BlockExtraction> extractionByBlock,
+        LootTableAcquisitionAnalyzer lootAnalyzer) {
+        Map<String, List<WorldgenSource>> indexed = new HashMap<>();
+        discovered.forEach((blockId, sources) -> {
+            BlockExtraction blockExtraction = extractionByBlock.get(blockId);
+            if (blockExtraction == null) {
+                return;
+            }
+            String lootTableId = blockExtraction.lootTableId();
+            List<AcquisitionPath> extractionPaths = lootAnalyzer == null
+                ? List.of() : lootAnalyzer.analyzeTable(lootTableId);
+            if (extractionPaths.isEmpty()) {
+                sources.forEach(source -> indexed.computeIfAbsent(blockExtraction.blockItemId(),
+                    ignored -> new ArrayList<>())
+                    .add(new WorldgenSource(source.sourceId(), source.biomeId(), source.placedFeatureId(), blockId,
+                        lootTableId, source.measurements(), source.attributes(), null)));
+                return;
+            }
+            for (WorldgenBlockSource source : sources) {
+                for (AcquisitionPath extractionPath : extractionPaths) {
+                    indexed.computeIfAbsent(extractionPath.itemId(), ignored -> new ArrayList<>())
+                        .add(new WorldgenSource(source.sourceId(), source.biomeId(), source.placedFeatureId(),
+                            blockId, lootTableId, source.measurements(), source.attributes(), extractionPath));
+                }
+            }
         });
         Map<String, List<WorldgenSource>> frozen = new HashMap<>();
         indexed.forEach((itemId, sources) -> frozen.put(itemId, sources.stream()
             .distinct().sorted(Comparator.comparing(WorldgenSource::sourceId)).toList()));
         return new WorldgenAcquisitionAnalyzer(frozen);
+    }
+
+    record BlockExtraction(String blockItemId, String lootTableId) {}
+
+    static WorldgenAcquisitionAnalyzer fromItemSources(
+        Map<String, List<WorldgenBlockSource>> sourcesByItem) {
+        Map<String, List<WorldgenSource>> indexed = new HashMap<>();
+        sourcesByItem.forEach((itemId, sources) -> indexed.put(itemId, sources.stream()
+            .map(source -> new WorldgenSource(source.sourceId(), source.biomeId(), source.placedFeatureId(),
+                itemId, null, source.measurements(), source.attributes(), null))
+            .toList()));
+        return new WorldgenAcquisitionAnalyzer(indexed);
     }
 
     public static Map<String, List<WorldgenBlockSource>> discoverBlockSources(Map<String, JsonObject> jsonResources) {
@@ -159,8 +210,6 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
                     "runtime generation conditions are not evaluated")
                 ));
             Map<String, EconomicFactor> costFactors = Map.ofEntries(
-                Map.entry("quantity_cost", EconomicFactor.unknown(
-                    "placement metrics do not establish expected player-obtainable units per attempt")),
                 Map.entry("time_cost", EconomicFactor.unknown(
                     "worldgen data does not expose travel or mining time")),
                 Map.entry("startup_cost", EconomicFactor.notApplicable(
@@ -185,16 +234,56 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
                     "worldgen placement has no consumed player material inputs")));
             Map<Integer, CostVector> costsByHorizon = new HashMap<>();
             for (int horizon : supportedHorizons()) {
-                costsByHorizon.put(horizon, new CostVector(horizon, costFactors));
+                Map<String, EconomicFactor> horizonFactors = new HashMap<>(costFactors);
+                CostVector extractionCosts = source.extractionPath() == null
+                    ? null : source.extractionPath().costsByHorizon().get(horizon);
+                horizonFactors.put("quantity_cost", extractionCosts == null
+                    ? EconomicFactor.unknown(
+                        "no indexed block-loot extraction quantity is available at this horizon")
+                    : extractionCosts.factors().getOrDefault("quantity_cost",
+                        EconomicFactor.unknown("block-loot quantity is unavailable at this horizon")));
+                costsByHorizon.put(horizon, new CostVector(horizon, horizonFactors));
             }
             Map<String, AcquisitionMeasurement> evidence = new HashMap<>(source.measurements());
-            evidence.put("expected_units_per_attempt", AcquisitionMeasurement.unknown(
-                "configured feature replacement targets and runtime conditions do not establish expected item yield"));
-            evidence.put("expected_attempts_per_unit", AcquisitionMeasurement.unknown(
-                "expected item yield from this feature is unknown"));
-            return new AcquisitionPath(itemId, "worldgen_feature", source.sourceId(), 1.0D,
+            if (source.extractionPath() == null) {
+                evidence.put("expected_units_per_attempt", AcquisitionMeasurement.unknown(
+                    "no block-loot extraction output is indexed for this generated block"));
+                evidence.put("expected_attempts_per_unit", AcquisitionMeasurement.unknown(
+                    "block-break loot quantity is unknown"));
+            } else {
+                evidence.putAll(source.extractionPath().evidence().measurements());
+            }
+            Map<String, String> attributes = new HashMap<>(source.attributes());
+            attributes.put("worldgen_block_id", source.blockId());
+            if (source.lootTableId() != null) {
+                attributes.put("block_loot_table", source.lootTableId());
+            }
+            if (source.extractionPath() == null) {
+                attributes.put("canonical_quantity_source", "unknown: no indexed block-loot extraction output");
+                attributes.put("canonical_quantity_unit", "item per defined extraction operation (unresolved)");
+                attributes.put("canonical_quantity_semantics",
+                    "UNKNOWN: no block-loot output was resolved for the generated block");
+                attributes.put("extraction_operation", "UNKNOWN: block-loot path was not indexed");
+            } else {
+                Map<String, String> extractionAttributes = source.extractionPath().evidence().attributes();
+                attributes.put("canonical_quantity_source",
+                    extractionAttributes.getOrDefault("canonical_quantity_source", "expected_units_per_attempt"));
+                attributes.put("canonical_quantity_unit",
+                    "item per block-break loot invocation");
+                attributes.put("canonical_quantity_semantics",
+                    extractionAttributes.getOrDefault("canonical_quantity_semantics",
+                        "block-loot table quantity per block break"));
+                attributes.put("extraction_operation", "break the generated block and evaluate its block loot table");
+                attributes.put("extraction_source_path", source.extractionPath().sourceId());
+            }
+            attributes.put("survival_availability",
+                "unknown: generated block discovery does not prove active-world or player access");
+            attributes.put("source_availability_classification", "UNKNOWN");
+            return new AcquisitionPath(itemId, "worldgen_feature",
+                source.sourceId() + (source.extractionPath() == null ? ""
+                    : "/extract/" + source.blockId() + "/" + source.lootTableId()), 1.0D,
                 null, null, null, false, feasibilityFactors, costsByHorizon,
-                new AcquisitionEvidence(evidence, source.attributes()));
+                new AcquisitionEvidence(evidence, attributes));
         }).toList();
     }
 
@@ -416,7 +505,8 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
     }
 
     private record WorldgenSource(String sourceId, String biomeId, String placedFeatureId, String blockId,
-        Map<String, AcquisitionMeasurement> measurements, Map<String, String> attributes) {}
+        String lootTableId, Map<String, AcquisitionMeasurement> measurements, Map<String, String> attributes,
+        AcquisitionPath extractionPath) {}
 
     private record WorldgenFeatureEvidence(Map<String, AcquisitionMeasurement> measurements,
         Map<String, String> attributes) {}

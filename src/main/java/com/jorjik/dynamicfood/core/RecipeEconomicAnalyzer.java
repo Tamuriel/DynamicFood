@@ -1,80 +1,47 @@
 package com.jorjik.dynamicfood.core;
 
+import com.jorjik.dynamicfood.graph.AcquisitionIngredient;
 import com.jorjik.dynamicfood.graph.RecipeGraph;
 import com.jorjik.dynamicfood.graph.RecipeNode;
-import com.jorjik.dynamicfood.graph.AcquisitionIngredient;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 
 public final class RecipeEconomicAnalyzer {
     private final RecipeGraph graph;
-    private final Map<String, Double> terminalCosts;
-    private final Map<String, RecipeEconomicResult> memo = new HashMap<>();
+    private final EconomicCostEvidenceProvider independentEvidence;
 
-    public RecipeEconomicAnalyzer(RecipeGraph graph, Map<String, Double> terminalCosts,
-        double materialReference, double materialCap) {
-        if (!Double.isFinite(materialReference) || materialReference <= 0.0D
-            || !Double.isFinite(materialCap) || materialCap <= 0.0D) {
-            throw new IllegalArgumentException("material normalization reference and cap must be finite and positive");
-        }
+    public RecipeEconomicAnalyzer(RecipeGraph graph, EconomicCostEvidenceProvider independentEvidence) {
         this.graph = graph;
-        this.terminalCosts = Map.copyOf(terminalCosts);
+        this.independentEvidence = java.util.Objects.requireNonNull(independentEvidence, "independentEvidence");
     }
 
-    public synchronized RecipeEconomicResult resolve(String itemId) {
-        return resolve(itemId, new ArrayList<>(), new HashSet<>());
+    public synchronized RecipeEconomicResult resolve(String itemId, int horizon) {
+        requireHorizon(horizon);
+        return resolve(itemId, horizon, new ArrayList<>(), new HashSet<>(), new java.util.HashMap<>());
     }
 
-    public synchronized Optional<RecipeEconomicResult> resolveUsingRecipe(RecipeNode recipe) {
+    public synchronized RecipeEconomicResult resolveUsingRecipe(RecipeNode recipe, int horizon) {
+        requireHorizon(horizon);
         if (recipe == null) {
-            return Optional.empty();
+            return unknown("unknown", List.of(), List.of(), List.of("recipe is unavailable"));
         }
-        if (recipe.acquisitionIngredients().isEmpty()) {
-            return Optional.of(new RecipeEconomicResult(recipe.resultId(), null, ResolutionStatus.UNKNOWN,
-                List.of(recipe.recipeId()), List.of(),
-                List.of("recipe exposes no item inputs; fluid or other inputs may still be required")));
-        }
-        double rawMaterialCost = 0.0D;
-        List<String> recipePath = new ArrayList<>();
-        recipePath.add(recipe.recipeId());
-        List<String> cycles = new ArrayList<>();
-        List<String> missing = new ArrayList<>();
-        boolean knownInputs = true;
-        for (AcquisitionIngredient ingredient : recipe.acquisitionIngredients()) {
-            RecipeEconomicResult child = resolveIngredient(ingredient.alternatives(), new ArrayList<>(),
-                new HashSet<>(), recipe.recipeId());
-            cycles.addAll(child.detectedCycles());
-            missing.addAll(child.missingInputs());
-            if (child.economicCost() == null) {
-                knownInputs = false;
-                missing.add("unknown input " + ingredient.alternatives());
-            } else {
-                rawMaterialCost += child.economicCost() * ingredient.count();
-                recipePath.addAll(child.recipePath());
-            }
-        }
-        if (!knownInputs) {
-            return Optional.of(new RecipeEconomicResult(recipe.resultId(), null, ResolutionStatus.UNKNOWN,
-                recipePath, cycles.stream().distinct().sorted().toList(),
-                missing.stream().distinct().sorted().toList()));
-        }
-        double perOutputRawCost = rawMaterialCost / Math.max(1, recipe.outputCount());
-        return Optional.of(new RecipeEconomicResult(recipe.resultId(), perOutputRawCost,
-            cycles.isEmpty() ? ResolutionStatus.COMPLETE : ResolutionStatus.PARTIAL,
-            recipePath, cycles.stream().distinct().sorted().toList(),
-            missing.stream().distinct().sorted().toList()));
+        return resolveRecipe(recipe, horizon, new ArrayList<>(List.of(recipe.recipeId())),
+            new HashSet<>(Set.of(recipe.resultId())), new java.util.HashMap<>());
     }
 
-    private RecipeEconomicResult resolve(String itemId, List<String> path, Set<String> visiting) {
-        Double terminalCost = terminalCosts.get(itemId);
-        if (terminalCost != null) {
-            return new RecipeEconomicResult(itemId, terminalCost, ResolutionStatus.COMPLETE,
-                List.of("terminal:" + itemId), List.of(), List.of());
+    private RecipeEconomicResult resolve(String itemId, int horizon, List<String> path,
+        Set<String> visiting, Map<String, RecipeEconomicResult> memo) {
+        EconomicCost evidenced = independentEvidence.resolve(itemId, horizon);
+        if (evidenced == null) {
+            evidenced = EconomicCost.unknown("economic evidence provider returned no result for " + itemId);
+        }
+        if (evidenced != null && evidenced.isKnown() && evidenced.observationHorizon() == horizon) {
+            return new RecipeEconomicResult(itemId, evidenced, ResolutionStatus.COMPLETE,
+                List.of("independent primitive: " + itemId), List.of(), List.of());
         }
         RecipeEconomicResult cached = memo.get(itemId);
         if (cached != null && !visiting.contains(itemId)) {
@@ -83,95 +50,153 @@ public final class RecipeEconomicAnalyzer {
         if (!visiting.add(itemId)) {
             ArrayList<String> cycle = new ArrayList<>(path);
             cycle.add(itemId);
-            return new RecipeEconomicResult(itemId, null, ResolutionStatus.UNKNOWN, List.of(),
-                List.of(String.join(" -> ", cycle)), List.of());
+            return unknown(itemId, List.of(), List.of(String.join(" -> ", cycle)), List.of());
         }
         path.add(itemId);
 
         List<RecipeEconomicResult> viable = new ArrayList<>();
         List<String> cycles = new ArrayList<>();
         List<String> missing = new ArrayList<>();
+        List<String> attemptedPaths = new ArrayList<>();
         for (RecipeNode recipe : graph.recipesFor(itemId)) {
-            if (recipe.acquisitionIngredients().isEmpty()) {
-                missing.add(recipe.recipeId()
-                    + ": recipe exposes no item inputs; fluid or other inputs may still be required");
-                continue;
+            RecipeEconomicResult result = resolveRecipe(recipe, horizon, path, visiting, memo);
+            cycles.addAll(result.detectedCycles());
+            missing.addAll(result.missingInputs());
+            attemptedPaths.addAll(result.recipePath());
+            if (result.target().isKnown()) {
+                viable.add(result);
             }
-            double rawMaterialCost = 0.0D;
-            boolean knownInputs = true;
-            List<String> recipePath = new ArrayList<>();
-            recipePath.add(recipe.recipeId());
-            for (AcquisitionIngredient ingredient : recipe.acquisitionIngredients()) {
-                RecipeEconomicResult child = resolveIngredient(ingredient.alternatives(), path, visiting,
-                    recipe.recipeId());
-                if (child == null) {
-                    missing.add(recipe.recipeId() + ": input alternatives have unknown or unequal economic costs "
-                        + ingredient.alternatives());
-                    knownInputs = false;
-                    break;
-                }
-                cycles.addAll(child.detectedCycles());
-                if (child.economicCost() == null) {
-                    missing.add(recipe.recipeId() + ": unknown input " + ingredient.alternatives());
-                    knownInputs = false;
-                    break;
-                }
-                rawMaterialCost += child.economicCost() * ingredient.count();
-                recipePath.addAll(child.recipePath());
-            }
-            if (!knownInputs) {
-                continue;
-            }
-            double perOutputRawCost = rawMaterialCost / Math.max(1, recipe.outputCount());
-            viable.add(new RecipeEconomicResult(itemId, perOutputRawCost, ResolutionStatus.COMPLETE,
-                recipePath, cycles, List.of()));
         }
 
         path.removeLast();
         visiting.remove(itemId);
         RecipeEconomicResult result;
         if (viable.isEmpty()) {
-            result = new RecipeEconomicResult(itemId, null, ResolutionStatus.UNKNOWN, List.of(),
-                cycles.stream().distinct().sorted().toList(), missing.stream().distinct().sorted().toList());
+            String evidenceReason = evidenced != null && evidenced.isKnown()
+                ? "independent primitive is evidenced at horizon " + evidenced.observationHorizon()
+                    + ", not requested horizon " + horizon
+                : "no independently evidenced compatible economic primitive reaches this resource";
+            missing.add(evidenceReason);
+            result = unknown(itemId, attemptedPaths.stream().distinct().toList(),
+                cycles.stream().distinct().sorted().toList(),
+                missing.stream().distinct().sorted().toList());
+        } else if (!missing.isEmpty() || !cycles.isEmpty()) {
+            missing.add("one or more recipe alternatives have unresolved or cyclic economic inputs");
+            result = unknown(itemId, attemptedPaths.stream().distinct().toList(),
+                cycles.stream().distinct().sorted().toList(),
+                missing.stream().distinct().sorted().toList());
         } else {
-            viable.sort(java.util.Comparator.comparingDouble((RecipeEconomicResult candidate) -> candidate.economicCost())
-                .thenComparing(candidate -> String.join("|", candidate.recipePath())));
-            result = viable.getFirst();
+            String primitive = viable.getFirst().target().primitiveId();
+            if (viable.stream().anyMatch(candidate ->
+                !primitive.equals(candidate.target().primitiveId()))) {
+                result = unknown(itemId, List.of(), cycles.stream().distinct().sorted().toList(),
+                    List.of("recipe paths use incompatible economic primitives"));
+            } else {
+                viable.sort(java.util.Comparator
+                    .comparingDouble((RecipeEconomicResult candidate) -> candidate.target().value())
+                    .thenComparing(candidate -> String.join("|", candidate.recipePath())));
+                result = viable.getFirst();
+            }
         }
-        if (result.detectedCycles().isEmpty()) {
-            memo.put(itemId, result);
-        }
+        // A finalized UNKNOWN may include a back-edge; cache it to avoid re-expanding shared cyclic branches.
+        memo.put(itemId, result);
         return result;
     }
 
-    private RecipeEconomicResult resolveIngredient(List<String> alternatives, List<String> path,
-        Set<String> visiting, String recipeId) {
+    private RecipeEconomicResult resolveRecipe(RecipeNode recipe, int horizon, List<String> path,
+        Set<String> visiting, Map<String, RecipeEconomicResult> memo) {
+        List<AcquisitionIngredient> ingredients = recipe.acquisitionIngredients();
+        if (ingredients.isEmpty()) {
+            return unknown(recipe.resultId(), List.of(recipe.recipeId()), List.of(),
+                List.of(recipe.recipeId() + ": recipe exposes no resolved item inputs"));
+        }
+        double rawMaterialCost = 0.0D;
+        EconomicCost basis = null;
+        List<String> recipePath = new ArrayList<>(List.of(recipe.recipeId()));
+        List<String> cycles = new ArrayList<>();
+        List<String> missing = new ArrayList<>();
+        for (AcquisitionIngredient ingredient : ingredients) {
+            if (ingredient.inputUse() == AcquisitionIngredient.InputUse.REUSABLE) {
+                recipePath.add("reusable input " + ingredient.alternatives());
+                continue;
+            }
+            if (ingredient.inputUse() == AcquisitionIngredient.InputUse.UNKNOWN) {
+                missing.add("input use is unknown for " + ingredient.alternatives());
+                continue;
+            }
+            RecipeEconomicResult child = resolveIngredient(ingredient.alternatives(), horizon,
+                path, visiting, memo);
+            cycles.addAll(child.detectedCycles());
+            missing.addAll(child.missingInputs());
+            if (!child.target().isKnown()) {
+                missing.add("unknown input " + ingredient.alternatives());
+                continue;
+            }
+            EconomicCost childCost = child.target();
+            if (childCost.observationHorizon() != horizon) {
+                missing.add("input " + ingredient.alternatives() + " is measured at an incompatible horizon");
+                continue;
+            }
+            if (basis == null) {
+                basis = childCost;
+            } else if (!basis.hasCompatibleBasis(childCost)) {
+                missing.add("recipe inputs use incompatible economic primitives or horizons");
+                continue;
+            }
+            rawMaterialCost += childCost.value() * ingredient.count();
+            recipePath.addAll(child.recipePath());
+        }
+        if (!missing.isEmpty() || basis == null || !Double.isFinite(rawMaterialCost)) {
+            return unknown(recipe.resultId(), recipePath, cycles.stream().distinct().sorted().toList(),
+                missing.isEmpty() ? List.of("recipe material cost is not representable") : missing);
+        }
+        double perOutputCost = rawMaterialCost / recipe.outputCount();
+        if (!Double.isFinite(perOutputCost)) {
+            return unknown(recipe.resultId(), recipePath, cycles.stream().distinct().sorted().toList(),
+                List.of("recipe output normalization produced a non-finite economic amount"));
+        }
+        EconomicCost target = EconomicCost.known(perOutputCost, basis.primitiveId(), horizon,
+            "recursive ingredient quantities divided by deterministic recipe output count");
+        return new RecipeEconomicResult(recipe.resultId(), target, ResolutionStatus.COMPLETE,
+            recipePath, cycles.stream().distinct().sorted().toList(), List.of());
+    }
+
+    private RecipeEconomicResult resolveIngredient(List<String> alternatives, int horizon,
+        List<String> path, Set<String> visiting, Map<String, RecipeEconomicResult> memo) {
         if (alternatives.isEmpty()) {
-            return new RecipeEconomicResult("unknown", null, ResolutionStatus.UNKNOWN, List.of(),
-                List.of(), List.of("ingredient has no resolved item alternatives"));
+            return unknown("unknown", List.of(), List.of(), List.of("ingredient has no resolved item alternatives"));
         }
         List<RecipeEconomicResult> candidates = alternatives.stream().sorted()
-            .map(itemId -> resolve(itemId, path, visiting)).toList();
+            .map(itemId -> resolve(itemId, horizon, path, visiting, memo)).toList();
         RecipeEconomicResult selected = candidates.getFirst();
         List<String> cycles = candidates.stream().flatMap(candidate -> candidate.detectedCycles().stream())
             .distinct().sorted().toList();
         List<String> missing = candidates.stream().flatMap(candidate -> candidate.missingInputs().stream())
             .distinct().sorted().toList();
-        if (candidates.stream().anyMatch(candidate -> candidate.economicCost() == null)) {
-            return new RecipeEconomicResult(selected.itemId(), null, ResolutionStatus.UNKNOWN, List.of(),
-                cycles, missing);
+        if (candidates.stream().anyMatch(candidate -> !candidate.target().isKnown())) {
+            return unknown(selected.itemId(), List.of(), cycles, missing);
         }
-        if (candidates.size() == 1) {
-            return selected;
+        EconomicCost selectedCost = selected.target();
+        for (RecipeEconomicResult candidate : candidates) {
+            if (!selectedCost.hasCompatibleBasis(candidate.target())
+                || Double.compare(selectedCost.value(), candidate.target().value()) != 0) {
+                return unknown(selected.itemId(), List.of(), cycles,
+                    List.of("ingredient alternatives have different evidenced economic costs"));
+            }
         }
-        double cost = selected.economicCost();
-        if (candidates.stream().anyMatch(candidate -> Double.compare(candidate.economicCost(), cost) != 0)) {
-            return new RecipeEconomicResult(selected.itemId(), null, ResolutionStatus.UNKNOWN, List.of(),
-                cycles, List.of("alternative inputs have unequal economic costs"));
+        return selected;
+    }
+
+    private static RecipeEconomicResult unknown(String itemId, List<String> path,
+        List<String> cycles, List<String> missing) {
+        return new RecipeEconomicResult(itemId, EconomicCost.unknown(
+            "recipe path has no independently evidenced compatible economic primitive"),
+            ResolutionStatus.UNKNOWN, path, cycles, missing);
+    }
+
+    private static void requireHorizon(int horizon) {
+        if (horizon < 1) {
+            throw new IllegalArgumentException("economic horizon must be positive");
         }
-        List<String> route = new ArrayList<>(selected.recipePath());
-        route.add(0, recipeId + ":equivalent-alternative-inputs");
-        return new RecipeEconomicResult(selected.itemId(), selected.economicCost(), selected.status(),
-            route, cycles, missing);
     }
 }
