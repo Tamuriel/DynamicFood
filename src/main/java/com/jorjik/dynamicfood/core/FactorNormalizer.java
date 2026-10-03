@@ -74,6 +74,16 @@ public final class FactorNormalizer {
         return logarithmic(expectedAttemptsPerUnit, attemptsReference, attemptsCap);
     }
 
+    public static EconomicFactor quantityCostForHorizon(double unconditionalExpectedUnitsPerAttempt,
+        int economicHorizon, double attemptsReference, double attemptsCap) {
+        if (!Double.isFinite(unconditionalExpectedUnitsPerAttempt) || unconditionalExpectedUnitsPerAttempt <= 0.0D
+            || economicHorizon < 1) {
+            return EconomicFactor.unknown("expected units per attempt and positive economic horizon are required");
+        }
+        return logarithmic(economicHorizon / unconditionalExpectedUnitsPerAttempt,
+            attemptsReference, attemptsCap);
+    }
+
     private static boolean validMetric(double value) {
         return Double.isFinite(value) && value >= 0.0D;
     }

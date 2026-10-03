@@ -68,6 +68,7 @@ class AcquisitionAnalyzersTest {
             .get("configured:testmod:ore_config:configured_cluster_size").value());
         assertEquals("testmod:forest", source.attributes().get("biome_restriction"));
         assertEquals("testmod:my_dimension", source.attributes().get("dimension"));
+
     }
 
     private static JsonObject json(String text) {

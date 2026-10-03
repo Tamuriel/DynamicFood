@@ -32,9 +32,27 @@ public final class RuntimeFoodApplier {
         if (outputs.isEmpty() || !DynamicFoodConfig.allowsRecipeType(provenance.recipeType())) {
             return;
         }
-        DynamicFoodValue value = DynamicFoodValue.snapshot(DynamicFood.ENGINE.resolve(provenance));
-        for (OutputValueAllocator.OutputTarget<ItemStack> target : outputs) {
-            applyValue(target.output(), value);
+        FoodValue operationValue = DynamicFood.ENGINE.resolve(provenance);
+        List<OutputValueAllocator.AllocatedOutput<ItemStack>> allocated =
+            OutputValueAllocator.allocate(operationValue, outputs);
+        double totalWeight = outputs.stream().mapToDouble(target -> target.allocationWeight() == null
+            ? target.quantity() : target.allocationWeight()).sum();
+        for (OutputValueAllocator.AllocatedOutput<ItemStack> allocation : allocated) {
+            OutputValueAllocator.OutputTarget<ItemStack> target = allocation.target();
+            double weight = target.allocationWeight() == null ? target.quantity() : target.allocationWeight();
+            double share = weight / totalWeight;
+            FoodValue outputValue = new FoodValue(
+                allocation.nutritionPerUnit(),
+                (int) Math.ceil(allocation.nutritionPerUnit()),
+                allocation.saturationPerUnit(),
+                allocation.saturationPerUnit(),
+                operationValue.difficulty(),
+                provenance.recipeId(),
+                provenance.outputCount(),
+                operationValue.components()
+            );
+            applyValue(target.output(), DynamicFoodValue.snapshot(outputValue,
+                OperationFoodSnapshot.from(provenance, operationValue, share)));
         }
     }
 

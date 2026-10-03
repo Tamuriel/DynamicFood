@@ -14,20 +14,16 @@ import java.util.Set;
 public final class RecipeEconomicAnalyzer {
     private final RecipeGraph graph;
     private final Map<String, Double> terminalCosts;
-    private final double materialReference;
-    private final double materialCap;
     private final Map<String, RecipeEconomicResult> memo = new HashMap<>();
 
     public RecipeEconomicAnalyzer(RecipeGraph graph, Map<String, Double> terminalCosts,
         double materialReference, double materialCap) {
-        this.graph = graph;
-        this.terminalCosts = Map.copyOf(terminalCosts);
         if (!Double.isFinite(materialReference) || materialReference <= 0.0D
             || !Double.isFinite(materialCap) || materialCap <= 0.0D) {
             throw new IllegalArgumentException("material normalization reference and cap must be finite and positive");
         }
-        this.materialReference = materialReference;
-        this.materialCap = materialCap;
+        this.graph = graph;
+        this.terminalCosts = Map.copyOf(terminalCosts);
     }
 
     public synchronized RecipeEconomicResult resolve(String itemId) {
@@ -68,14 +64,7 @@ public final class RecipeEconomicAnalyzer {
                 missing.stream().distinct().sorted().toList()));
         }
         double perOutputRawCost = rawMaterialCost / Math.max(1, recipe.outputCount());
-        EconomicFactor normalized = FactorNormalizer.logarithmic(perOutputRawCost,
-            materialReference, materialCap);
-        if (!normalized.isKnown()) {
-            return Optional.of(new RecipeEconomicResult(recipe.resultId(), null, ResolutionStatus.UNKNOWN,
-                recipePath, cycles.stream().distinct().sorted().toList(),
-                List.of("material cost normalization unavailable")));
-        }
-        return Optional.of(new RecipeEconomicResult(recipe.resultId(), normalized.value(),
+        return Optional.of(new RecipeEconomicResult(recipe.resultId(), perOutputRawCost,
             cycles.isEmpty() ? ResolutionStatus.COMPLETE : ResolutionStatus.PARTIAL,
             recipePath, cycles.stream().distinct().sorted().toList(),
             missing.stream().distinct().sorted().toList()));
@@ -134,12 +123,7 @@ public final class RecipeEconomicAnalyzer {
                 continue;
             }
             double perOutputRawCost = rawMaterialCost / Math.max(1, recipe.outputCount());
-            EconomicFactor normalized = FactorNormalizer.logarithmic(perOutputRawCost, materialReference, materialCap);
-            if (!normalized.isKnown()) {
-                missing.add(recipe.recipeId() + ": material cost normalization unavailable");
-                continue;
-            }
-            viable.add(new RecipeEconomicResult(itemId, normalized.value(), ResolutionStatus.COMPLETE,
+            viable.add(new RecipeEconomicResult(itemId, perOutputRawCost, ResolutionStatus.COMPLETE,
                 recipePath, cycles, List.of()));
         }
 

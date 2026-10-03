@@ -6,6 +6,7 @@ import com.jorjik.dynamicfood.core.CalibrationAnchor;
 import com.jorjik.dynamicfood.core.FoodCalibrationSettings;
 import com.jorjik.dynamicfood.core.DynamicFoodEngine;
 import com.jorjik.dynamicfood.core.EconomicFactor;
+import com.jorjik.dynamicfood.core.FactorNormalizer;
 import com.jorjik.dynamicfood.core.IngredientContribution;
 import com.jorjik.dynamicfood.core.ResourceEconomicProfile;
 import com.jorjik.dynamicfood.core.SurvivalAcquirability;
@@ -137,6 +138,28 @@ public final class DynamicFoodConsumptionGameTest {
     }
 
     @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
+    public static void foodPropertiesUseEffectiveSaturationPointsAtMinecraftBoundary(GameTestHelper helper) {
+        float modifier = 0.375F;
+        for (int nutrition : List.of(0, 1, 5, 10)) {
+            FoodProperties built = new FoodProperties.Builder()
+                .nutrition(nutrition)
+                .saturationModifier(modifier)
+                .build();
+            double expected = 2.0D * nutrition * modifier;
+            helper.assertTrue(Math.abs(built.saturation() - expected) < 0.0001D,
+                "Minecraft builder must store effective saturation points for nutrition " + nutrition);
+        }
+
+        FoodProperties base = new FoodProperties.Builder().nutrition(5).saturationModifier(0.2F).build();
+        DynamicFoodValue highEffectiveSaturation = new DynamicFoodValue(5.0D, 5, 37.25D, 37.25F,
+            1.0D, "gametest:saturation_boundary", 1, List.of());
+        FoodProperties updated = FoodPropertiesUpdater.withDynamicValue(base, highEffectiveSaturation);
+        helper.assertTrue(Math.abs(updated.saturation() - 37.25F) < 0.0001F,
+            "FoodProperties updater must write canonical effective points without converting them twice");
+        helper.succeed();
+    }
+
+    @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
     public static void rawCalibratedFoodGetsStackSnapshotBeforeConsumption(GameTestHelper helper) {
         DynamicFood.ENGINE.rebuildCalibration(List.of(new ResourceEconomicProfile(
             "minecraft:bread", "minecraft:bread", 0.5D, 1.0D, 1.0D,
@@ -249,6 +272,43 @@ public final class DynamicFoodConsumptionGameTest {
     }
 
     @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
+    public static void legacyTransactionAllocatesOneOperationAcrossFoodOutputs(GameTestHelper helper) {
+        ItemStack input = new ItemStack(Items.WHEAT);
+        DynamicFoodValue inputValue = new DynamicFoodValue(5.0D, 5, 2.0D, 2.0F,
+            1.0D, "gametest:legacy_input", 1, List.of());
+        input.set(DynamicFoodDataComponents.VALUE.get(), inputValue);
+        ItemStack firstFood = new ItemStack(Items.BREAD);
+        ItemStack secondFood = new ItemStack(Items.COOKED_BEEF);
+        ItemStack technicalOutput = new ItemStack(Items.BOWL);
+        List<ItemStack> outputs = List.of(firstFood, secondFood, technicalOutput);
+        RuntimeProvenance provenance = RuntimeProvenance.fromStacks("minecraft:bread",
+            "gametest:legacy_multi_output", "minecraft:crafting", 2, List.of(input));
+        var operationValue = DynamicFood.ENGINE.resolve(provenance);
+
+        new RecipeTransactionHandler().onTransaction(new RecipeTransactionEvent(
+            outputs, "gametest:legacy_multi_output", "minecraft:crafting", List.of(input)));
+
+        DynamicFoodValue firstValue = firstFood.get(DynamicFoodDataComponents.VALUE.get());
+        DynamicFoodValue secondValue = secondFood.get(DynamicFoodDataComponents.VALUE.get());
+        helper.assertTrue(firstValue != null && secondValue != null
+            && technicalOutput.get(DynamicFoodDataComponents.VALUE.get()) == null,
+            "legacy transactions must decorate only food outputs");
+        double allocatedNutrition = firstValue.rawNutrition() * firstFood.getCount()
+            + secondValue.rawNutrition() * secondFood.getCount();
+        double allocatedSaturation = firstValue.rawSaturation() * firstFood.getCount()
+            + secondValue.rawSaturation() * secondFood.getCount();
+        helper.assertTrue(Math.abs(allocatedNutrition - operationValue.rawNutrition() * operationValue.outputCount())
+            < 0.0001D
+            && Math.abs(allocatedSaturation - operationValue.rawSaturation() * operationValue.outputCount())
+                < 0.0001D,
+            "the sum of legacy food output values must equal one operation total, not duplicate it");
+        helper.assertTrue(Math.abs(firstValue.operationSnapshot().orElseThrow().allocationShare()
+                + secondValue.operationSnapshot().orElseThrow().allocationShare() - 1.0D) < 0.0001D,
+            "legacy output allocation shares must sum to one");
+        helper.succeed();
+    }
+
+    @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
     public static void dynamicFoodComponentSurvivesCopySplitAndWorldSerialization(GameTestHelper helper) {
         ItemStack original = new ItemStack(Items.BREAD, 2);
         DynamicFoodValue value = new DynamicFoodValue(3.5D, 4, 1.25D, 1.25F,
@@ -289,6 +349,7 @@ public final class DynamicFoodConsumptionGameTest {
         List<AcquisitionPath> wheat = DynamicFood.ENGINE.acquisitionPaths("minecraft:wheat");
         List<AcquisitionPath> cod = DynamicFood.ENGINE.acquisitionPaths("minecraft:cod");
         List<AcquisitionPath> goldenApple = DynamicFood.ENGINE.acquisitionPaths("minecraft:golden_apple");
+        List<AcquisitionPath> coalOre = DynamicFood.ENGINE.acquisitionPaths("minecraft:coal_ore");
 
         helper.assertTrue(wheat.stream().anyMatch(path -> path.sourceType().equals("crop")),
             "wheat block loot must be indexed as a crop source; observed types="
@@ -300,6 +361,29 @@ public final class DynamicFoodConsumptionGameTest {
             "fishing loot must be indexed as a fishing source");
         helper.assertTrue(goldenApple.stream().anyMatch(path -> path.sourceType().equals("worldgen")),
             "chest loot must be indexed as a worldgen source");
+        helper.assertTrue(wheat.stream().filter(path -> path.sourceType().equals("crop"))
+            .allMatch(path -> path.evidence().measurements().get("crop_max_age") != null
+                && path.evidence().measurements().get("crop_growth_time_ticks") != null
+                && path.evidence().measurements().get("crop_seed_return_per_cycle") != null),
+            "crop paths must expose version-verified max age and explicit unknown growth/seed-loop measurements");
+        helper.assertTrue(coalOre.stream().anyMatch(path -> path.sourceType().equals("worldgen_feature")),
+            "vanilla coal ore must retain its discovered worldgen acquisition path");
+        helper.assertTrue(coalOre.stream().filter(path -> path.sourceType().equals("worldgen_feature"))
+            .allMatch(path -> path.costsByHorizon().get(100).factors().get("quantity_cost").isUnknown()
+                && path.costsByHorizon().get(100).factors().get("material_cost").isNotApplicable()
+                && path.costsByHorizon().get(100).factors().get("equipment_cost").isUnknown()),
+            "worldgen must preserve measurable evidence while distinguishing inapplicable inputs from unknown mining costs");
+        helper.succeed();
+    }
+
+    @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
+    public static void economicPopulationClassifiesNonFoodResourcesWithoutNameHeuristics(GameTestHelper helper) {
+        helper.assertTrue(!DynamicFoodEngine.isTechnicalResource(new ItemStack(Items.DIAMOND)),
+            "a non-food raw economic resource must not be excluded merely for lacking food properties");
+        helper.assertTrue(DynamicFoodEngine.isTechnicalResource(new ItemStack(Items.DIAMOND_SWORD)),
+            "damageable equipment must be excluded from the automatic economic calibration population");
+        helper.assertTrue(DynamicFoodEngine.isTechnicalResource(new ItemStack(Items.CHEST)),
+            "block-entity containers must be excluded from the automatic economic calibration population");
         helper.succeed();
     }
 
@@ -315,6 +399,7 @@ public final class DynamicFoodConsumptionGameTest {
         ));
         VillagerTradeAcquisitionAnalyzer analyzer =
             VillagerTradeAcquisitionAnalyzer.empty().withProfession("minecraft:farmer", trades);
+        VillagerTradeAcquisitionAnalyzer pricedAnalyzer = analyzer.withInputCosts(Map.of("minecraft:emerald", 0.5D));
         DynamicFoodEngine engine = new DynamicFoodEngine();
         engine.replaceVillagerTradeListings("minecraft:farmer", trades);
 
@@ -327,11 +412,21 @@ public final class DynamicFoodConsumptionGameTest {
         helper.assertTrue(breadPaths.getFirst().costsByHorizon().get(100)
             .factors().get("quantity_cost").isKnown()
             && !breadPaths.getFirst().costsByHorizon().get(100).factors().get("material_cost").isKnown()
-            && breadPaths.getFirst().evidence().measurement("output_quantity_per_completed_offer").value() == 2.0D,
-            "known fixed output quantity must be indexed while unknown price/input costs remain unknown");
+            && breadPaths.getFirst().evidence().measurement("output_quantity_per_completed_offer").value() == 2.0D
+            && breadPaths.getFirst().evidence().measurement("input_quantity:minecraft:emerald").value() == 1.0D
+            && breadPaths.getFirst().evidence().measurement("maximum_uses").value() == 12.0D
+            && breadPaths.getFirst().evidence().attributes().get("price_model")
+                .contains("demand, reputation"),
+            "observed trade output, inputs and restock limits must be retained while unknown input prices stay unknown");
         helper.assertTrue(applePaths.size() == 1
-            && applePaths.getFirst().sourceId().equals("minecraft:farmer/level_1/listing_1"),
-            "the verified vanilla ItemsForEmeralds fixed itemStack must be indexed without invoking its Entity-dependent offer");
+            && applePaths.getFirst().sourceId().equals("minecraft:farmer/level_1/listing_1")
+            && applePaths.getFirst().evidence().measurement("input_quantity:minecraft:emerald").value() == 1.0D,
+            "the verified vanilla trade must retain its base emerald input without invoking its Entity-dependent offer");
+        EconomicFactor pricedMaterial = pricedAnalyzer.analyze("minecraft:bread").getFirst()
+            .costsByHorizon().get(100).factors().get("material_cost");
+        helper.assertTrue(pricedMaterial.isKnown()
+            && Math.abs(pricedMaterial.value() - FactorNormalizer.logarithmic(25.0D, 1.0D, 100.0D).value()) < 0.0001D,
+            "known input economics must be recursively counted and normalized for the requested output horizon");
         helper.assertTrue(analyzer.unindexedListingCount() == 1,
             "unsupported Java-only ItemListing implementations must remain visible as unindexed");
         helper.assertTrue(DynamicFood.ENGINE.acquisitionPaths("minecraft:bread").stream()

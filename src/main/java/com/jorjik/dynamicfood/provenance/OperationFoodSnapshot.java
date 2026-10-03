@@ -102,6 +102,22 @@ public record OperationFoodSnapshot(
             operationNutrition - componentNutrition, operationSaturation - componentSaturation);
     }
 
+    public static OperationFoodSnapshot from(RuntimeProvenance provenance, FoodValue value,
+        double allocationShare) {
+        double componentNutrition = value.components().stream()
+            .mapToDouble(input -> input.nutrition() * input.count()).sum();
+        double componentSaturation = value.components().stream()
+            .mapToDouble(input -> input.saturation() * input.count()).sum();
+        double operationNutrition = value.rawNutrition() * value.outputCount();
+        double operationSaturation = value.rawSaturation() * value.outputCount();
+        String itemInputs = provenance.actualInputs().stream()
+            .map(input -> input.itemId() + " x" + input.count())
+            .collect(java.util.stream.Collectors.joining(", "));
+        return new OperationFoodSnapshot(provenance.recipeType(), "unknown", provenance.stationDifficulty(),
+            itemInputs, "", "", allocationShare, componentNutrition, componentSaturation,
+            operationNutrition - componentNutrition, operationSaturation - componentSaturation);
+    }
+
     private static boolean unit(double value) {
         return Double.isFinite(value) && value >= 0.0D && value <= 1.0D;
     }

@@ -41,6 +41,16 @@ public final class DynamicFoodCommand {
                         output.append("\nAcquisition diagnostics: ")
                             .append(String.join("; ", resolvedEconomic.reasons()));
                     }
+                    var survival = DynamicFood.ENGINE.survivalAcquirability(itemId);
+                    output.append("\nSurvival acquirability: ").append(survival.state())
+                        .append(" (").append(survival.explanation()).append(')');
+                    DynamicFood.ENGINE.economicProfile(itemId).ifPresent(profile -> output
+                        .append("\nEconomic resource identity: ").append(profile.economicResourceIdentity())
+                        .append("\nEconomic profile: terminal=").append(profile.terminal())
+                        .append(", calibration eligible=").append(profile.calibrationEligible())
+                        .append(", calibration weight=").append(profile.calibrationWeight())
+                        .append(", technical=").append(profile.technical())
+                        .append(", derived=").append(profile.derived()));
                     if (resolvedEconomic.primaryPath() != null) {
                         output.append("\nAcquisition path: ").append(resolvedEconomic.primaryPath().sourceType())
                             .append('/').append(resolvedEconomic.primaryPath().sourceId());
@@ -72,11 +82,19 @@ public final class DynamicFoodCommand {
                                 output.append("\n    Missing feasibility factors: ")
                                     .append(String.join(", ", path.feasibility().missingFactors()));
                             }
+                            if (!path.feasibility().notApplicableFactors().isEmpty()) {
+                                output.append("\n    Not-applicable feasibility factors: ")
+                                    .append(String.join(", ", path.feasibility().notApplicableFactors()));
+                            }
                             if (!path.cost().normalizedFactors().isEmpty()) {
                                 output.append("\n    Cost factors: ").append(path.cost().normalizedFactors());
                             }
                             if (!path.cost().missingFactors().isEmpty()) {
                                 output.append("\n    Unknown cost factors: ").append(path.cost().missingFactors());
+                            }
+                            if (!path.cost().notApplicableFactors().isEmpty()) {
+                                output.append("\n    Not-applicable cost factors: ")
+                                    .append(path.cost().notApplicableFactors());
                             }
                             if (!path.path().evidence().measurements().isEmpty()) {
                                 output.append("\n    Observed mechanics: ")

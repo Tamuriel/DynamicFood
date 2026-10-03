@@ -128,22 +128,64 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
             return List.of();
         }
         return sources.stream().map(source -> {
-            Map<String, EconomicFactor> unknownFactors = new HashMap<>();
-            for (String factor : List.of("probability", "expected_yield", "repeatability", "renewability",
-                "progression_requirement", "danger", "equipment_availability")) {
-                unknownFactors.put(factor, EconomicFactor.unknown(
-                    "biome feature reference is known; placement frequency and runtime conditions are not evaluated"));
-            }
-            Map<String, EconomicFactor> unknownCosts = new HashMap<>();
-            for (String factor : List.of("quantity_cost", "time_cost", "startup_cost", "recurring_cost",
-                "prerequisite_cost", "progression_cost", "equipment_cost", "danger_cost", "transport_cost",
-                "intermediate_cost", "resource_consumption_cost", "material_cost")) {
-                unknownCosts.put(factor, EconomicFactor.unknown(
-                    "standard biome/placed-feature data does not establish a measurable acquisition cost"));
-            }
+            Map<String, EconomicFactor> feasibilityFactors = Map.ofEntries(
+                Map.entry("probability", EconomicFactor.unknown(
+                    "placement modifiers are known but do not establish player-available expected item yield")),
+                Map.entry("expected_yield", EconomicFactor.unknown(
+                    "feature placement and replacement behavior do not establish expected mined item yield")),
+                Map.entry("repeatability", EconomicFactor.unknown(
+                    "worldgen data does not establish the remaining accessible generation area")),
+                Map.entry("renewability", EconomicFactor.unknown(
+                    "worldgen data does not establish whether accessible generation is renewable")),
+                Map.entry("startup_cost", EconomicFactor.notApplicable(
+                    "worldgen placement has no player startup operation")),
+                Map.entry("recurring_cost", EconomicFactor.notApplicable(
+                    "worldgen placement has no player recurring input operation")),
+                Map.entry("prerequisite_cost", EconomicFactor.notApplicable(
+                    "worldgen feature definitions contain no player prerequisite operation")),
+                Map.entry("processing_requirements", EconomicFactor.notApplicable(
+                    "worldgen placement is not a recipe-processing operation")),
+                Map.entry("progression_requirement", EconomicFactor.notApplicable(
+                    "worldgen data has no progression-gated generation mechanic")),
+                Map.entry("danger", EconomicFactor.unknown(
+                    "biome and dimension evidence does not determine player danger")),
+                Map.entry("resource_consumption", EconomicFactor.unknown(
+                    "mining tool and durability requirements are not represented by feature data")),
+                Map.entry("intermediate_steps", EconomicFactor.notApplicable(
+                    "worldgen placement has no recursive recipe steps")),
+                Map.entry("equipment_availability", EconomicFactor.unknown(
+                    "required mining equipment is not represented by feature data")),
+                Map.entry("reliability", EconomicFactor.unknown(
+                    "runtime generation conditions are not evaluated")
+                ));
+            Map<String, EconomicFactor> costFactors = Map.ofEntries(
+                Map.entry("quantity_cost", EconomicFactor.unknown(
+                    "placement metrics do not establish expected player-obtainable units per attempt")),
+                Map.entry("time_cost", EconomicFactor.unknown(
+                    "worldgen data does not expose travel or mining time")),
+                Map.entry("startup_cost", EconomicFactor.notApplicable(
+                    "worldgen placement has no player startup operation")),
+                Map.entry("recurring_cost", EconomicFactor.notApplicable(
+                    "worldgen placement has no player recurring input operation")),
+                Map.entry("prerequisite_cost", EconomicFactor.notApplicable(
+                    "worldgen feature definitions contain no player prerequisite operation")),
+                Map.entry("progression_cost", EconomicFactor.notApplicable(
+                    "worldgen data has no progression-gated generation mechanic")),
+                Map.entry("equipment_cost", EconomicFactor.unknown(
+                    "mining equipment and replacement cost are not represented by feature data")),
+                Map.entry("danger_cost", EconomicFactor.unknown(
+                    "biome and dimension evidence does not determine player danger")),
+                Map.entry("transport_cost", EconomicFactor.unknown(
+                    "biome restrictions do not determine player travel distance")),
+                Map.entry("intermediate_cost", EconomicFactor.notApplicable(
+                    "worldgen placement has no recursive recipe inputs")),
+                Map.entry("resource_consumption_cost", EconomicFactor.unknown(
+                    "tool durability and mining consumables are not represented by feature data")),
+                Map.entry("material_cost", EconomicFactor.notApplicable(
+                    "worldgen placement has no consumed player material inputs")));
             Map<Integer, CostVector> costsByHorizon = new HashMap<>();
             for (int horizon : supportedHorizons()) {
-                costsByHorizon.put(horizon, new CostVector(horizon, unknownCosts));
+                costsByHorizon.put(horizon, new CostVector(horizon, costFactors));
             }
             Map<String, AcquisitionMeasurement> evidence = new HashMap<>(source.measurements());
             evidence.put("expected_units_per_attempt", AcquisitionMeasurement.unknown(
@@ -151,7 +193,7 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
             evidence.put("expected_attempts_per_unit", AcquisitionMeasurement.unknown(
                 "expected item yield from this feature is unknown"));
             return new AcquisitionPath(itemId, "worldgen_feature", source.sourceId(), 1.0D,
-                null, null, null, false, unknownFactors, costsByHorizon,
+                null, null, null, false, feasibilityFactors, costsByHorizon,
                 new AcquisitionEvidence(evidence, source.attributes()));
         }).toList();
     }

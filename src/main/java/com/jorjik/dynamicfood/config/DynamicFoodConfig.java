@@ -77,7 +77,7 @@ public final class DynamicFoodConfig {
         .defineInRange("food_calibration.configured_fallback_saturation", 0.0D, 0.0D, 1000.0D);
 
     public static final ModConfigSpec.ConfigValue<List<? extends String>> ECONOMIC_RESOURCE_OVERRIDES = BUILDER
-        .comment("Explicit calibration profiles: item_id|economic_cost[0..1]|weight>0|group-or--|TRUE/FALSE/UNKNOWN survival availability.")
+        .comment("Explicit economic profiles: item_id|economic_cost>=0|weight>0|group-or--|TRUE/FALSE/UNKNOWN survival availability.")
         .defineListAllowEmpty("food_calibration.economic_resources", List.of(), value -> value instanceof String);
 
     public static final ModConfigSpec.DoubleValue MATERIAL_COST_REFERENCE = BUILDER

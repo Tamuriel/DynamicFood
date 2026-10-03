@@ -15,16 +15,23 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.npc.VillagerTrades;
 import net.minecraft.world.entity.npc.VillagerTrades.ItemListing;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.trading.MerchantOffer;
 import net.neoforged.neoforge.common.BasicItemListing;
 
 public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyzer {
     private static final Field VANILLA_FIXED_OUTPUT = findVanillaFixedOutputField();
+    private static final Field VANILLA_EMERALD_COST = findVanillaField("emeraldCost");
+    private static final Field VANILLA_MAX_USES = findVanillaField("maxUses");
+    private static final Field VANILLA_PRICE_MULTIPLIER = findVanillaField("priceMultiplier");
 
     private final Map<String, List<TradeOutput>> outputsByProfession;
     private final Map<String, List<TradeOutput>> outputsByItem;
     private final int unindexedListingCount;
+    private final Map<String, Double> knownInputCosts;
 
-    private VillagerTradeAcquisitionAnalyzer(Map<String, List<TradeOutput>> outputsByProfession) {
+    private VillagerTradeAcquisitionAnalyzer(Map<String, List<TradeOutput>> outputsByProfession,
+        Map<String, Double> knownInputCosts) {
         Map<String, List<TradeOutput>> professionSnapshot = new TreeMap<>();
         outputsByProfession.forEach((profession, outputs) ->
             professionSnapshot.put(profession, List.copyOf(outputs)));
@@ -45,10 +52,15 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
             .sorted(Comparator.comparing(TradeOutput::sourceId)).toList());
         this.outputsByItem = Map.copyOf(byItem);
         this.unindexedListingCount = unindexed;
+        this.knownInputCosts = Map.copyOf(knownInputCosts);
     }
 
     public static VillagerTradeAcquisitionAnalyzer empty() {
-        return new VillagerTradeAcquisitionAnalyzer(Map.of());
+        return new VillagerTradeAcquisitionAnalyzer(Map.of(), Map.of());
+    }
+
+    public VillagerTradeAcquisitionAnalyzer withInputCosts(Map<String, Double> inputCosts) {
+        return new VillagerTradeAcquisitionAnalyzer(outputsByProfession, inputCosts);
     }
 
     public VillagerTradeAcquisitionAnalyzer withProfession(String professionId,
@@ -61,34 +73,37 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
             List<ItemListing> listings = levelEntry.getValue();
             for (int index = 0; index < listings.size(); index++) {
                 ItemListing listing = listings.get(index);
-                Optional<ItemStack> fixedOutput = fixedOutput(listing);
-                if (fixedOutput.isEmpty()) {
-                    outputs.add(new TradeOutput(null, professionId + "/level_" + levelEntry.getKey()
-                        + "/listing_" + index, 0));
+                String sourceId = professionId + "/level_" + levelEntry.getKey() + "/listing_" + index;
+                Optional<FixedTrade> fixedTrade = fixedTrade(listing);
+                if (fixedTrade.isEmpty()) {
+                    outputs.add(TradeOutput.unindexed(sourceId, levelEntry.getKey()));
                     continue;
                 }
-                ItemStack stack = fixedOutput.get();
+                FixedTrade trade = fixedTrade.get();
+                ItemStack stack = trade.output();
                 if (stack.isEmpty()) {
-                    outputs.add(new TradeOutput(null, professionId + "/level_" + levelEntry.getKey()
-                        + "/listing_" + index, 0));
+                    outputs.add(TradeOutput.unindexed(sourceId, levelEntry.getKey()));
                     continue;
                 }
                 var itemKey = BuiltInRegistries.ITEM.getKey(stack.getItem());
                 if (itemKey == null) {
                     DynamicFood.LOGGER.warn("Villager trade {} has an output item without a registry key",
-                        professionId + "/level_" + levelEntry.getKey() + "/listing_" + index);
-                    outputs.add(new TradeOutput(null, professionId + "/level_" + levelEntry.getKey()
-                        + "/listing_" + index, 0));
+                        sourceId);
+                    outputs.add(TradeOutput.unindexed(sourceId, levelEntry.getKey()));
                     continue;
                 }
-                outputs.add(new TradeOutput(itemKey.toString(), professionId + "/level_" + levelEntry.getKey()
-                    + "/listing_" + index, stack.getCount()));
+                List<TradeInput> inputs = trade.inputs().stream()
+                    .map(input -> itemInput(input, sourceId))
+                    .filter(java.util.Objects::nonNull)
+                    .toList();
+                outputs.add(new TradeOutput(itemKey.toString(), sourceId, stack.getCount(), inputs,
+                    levelEntry.getKey(), trade.maxUses(), trade.priceMultiplier()));
             }
         });
 
         Map<String, List<TradeOutput>> updated = new TreeMap<>(outputsByProfession);
         updated.put(professionId, List.copyOf(outputs));
-        return new VillagerTradeAcquisitionAnalyzer(updated);
+        return new VillagerTradeAcquisitionAnalyzer(updated, knownInputCosts);
     }
 
     @Override
@@ -104,46 +119,129 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
         }
         return outputs.stream().map(output -> {
             Map<String, EconomicFactor> costs = new HashMap<>();
-            EconomicFactor quantity = FactorNormalizer.quantityCost(output.outputCount(),
-                DynamicFoodConfig.lootAttemptsReference(), DynamicFoodConfig.lootAttemptsCap());
-            costs.put("quantity_cost", quantity);
-            costs.put("probability_cost", EconomicFactor.unknown(
-                "villager offer selection probability is not observed"));
-            costs.put("yield_cost", EconomicFactor.unknown(
-                "trade offer output count is known; offer selection and failed attempts are not modeled"));
-            for (String factor : List.of("time_cost", "startup_cost", "recurring_cost",
-                "prerequisite_cost", "progression_cost", "equipment_cost", "danger_cost", "transport_cost",
-                "intermediate_cost", "resource_consumption_cost", "material_cost")) {
-                costs.put(factor, EconomicFactor.unknown(
-                    "trade selection probability, final price, and input resource cost are not resolved"));
-            }
-            costs.put("probability_cost", EconomicFactor.unknown(
-                "villager offer selection probability is not observed"));
-            costs.put("yield_cost", EconomicFactor.unknown(
-                "trade output quantity is not enough to resolve the number of offers required"));
             Map<Integer, CostVector> horizons = new HashMap<>();
             for (int horizon : supportedHorizons()) {
+                EconomicFactor materialCost = materialCost(output, horizon);
+                costs.clear();
+                costs.put("quantity_cost", FactorNormalizer.quantityCostForHorizon(output.outputCount(),
+                    horizon, DynamicFoodConfig.lootAttemptsReference(), DynamicFoodConfig.lootAttemptsCap()));
+                costs.put("probability_cost", EconomicFactor.notApplicable(
+                    "the player selects a listed trade instead of randomly selecting an offer"));
+                costs.put("yield_cost", EconomicFactor.notApplicable(
+                    "completed trade output quantity is represented by quantity_cost"));
+                costs.put("time_cost", EconomicFactor.unknown("trade data does not expose time per completed offer"));
+                costs.put("startup_cost", EconomicFactor.notApplicable(
+                    "trade listing has no separate one-time setup input"));
+                costs.put("recurring_cost", EconomicFactor.notApplicable(
+                    "repeated trade inputs are represented by material_cost"));
+                costs.put("prerequisite_cost", EconomicFactor.unknown(
+                    "profession and workstation access costs are not resolved"));
+                costs.put("progression_cost", output.level() == 1
+                    ? EconomicFactor.unknown("profession access requirements are not resolved")
+                    : EconomicFactor.unknown("villager level is known but its leveling costs are not resolved"));
+                costs.put("equipment_cost", EconomicFactor.unknown(
+                    "villager workstation acquisition cost is not resolved"));
+                costs.put("danger_cost", EconomicFactor.unknown(
+                    "villager location and protection requirements are not resolved"));
+                costs.put("transport_cost", EconomicFactor.unknown(
+                    "villager and input travel distance are not resolved"));
+                costs.put("intermediate_cost", EconomicFactor.notApplicable(
+                    "trade input economics are represented by material_cost"));
+                costs.put("resource_consumption_cost", EconomicFactor.notApplicable(
+                    "consumed trade input quantities are represented by material_cost"));
+                costs.put("material_cost", materialCost);
                 horizons.put(horizon, new CostVector(horizon, costs));
             }
+            EconomicFactor quantity = FactorNormalizer.quantityCostForHorizon(output.outputCount(), 1,
+                DynamicFoodConfig.lootAttemptsReference(), DynamicFoodConfig.lootAttemptsCap());
             Map<String, AcquisitionMeasurement> evidence = new HashMap<>(Map.of(
                 "output_quantity_per_completed_offer", AcquisitionMeasurement.known(output.outputCount()),
                 "expected_units_per_attempt", AcquisitionMeasurement.known(output.outputCount()),
                 "expected_attempts_per_unit", AcquisitionMeasurement.known(1.0D / output.outputCount()),
-                "offer_selection_probability", AcquisitionMeasurement.unknown(
-                    "villager offer selection and price availability are not observed")
+                "offer_selection_probability", AcquisitionMeasurement.known(1.0D),
+                "maximum_uses", AcquisitionMeasurement.known(output.maxUses()),
+                "villager_level", AcquisitionMeasurement.known(output.level()),
+                "canonical_quantity_normalized_at_unit_horizon", AcquisitionMeasurement.known(quantity.value())
             ));
+            for (TradeInput input : output.inputs()) {
+                evidence.put("input_quantity:" + input.itemId(), AcquisitionMeasurement.known(input.quantity()));
+                Double inputCost = knownInputCosts.get(input.itemId());
+                evidence.put("input_economic_cost:" + input.itemId(), inputCost == null
+                    ? AcquisitionMeasurement.unknown("no resolved economic profile for trade input")
+                    : AcquisitionMeasurement.known(inputCost));
+            }
             for (int horizon : supportedHorizons()) {
                 evidence.put("expected_successful_offers_to_obtain_" + horizon,
                     AcquisitionMeasurement.known(horizon / (double) output.outputCount()));
             }
             return new AcquisitionPath(itemId, "villager_trade", output.sourceId(), 1.0D,
                 null, null, null, false,
-                Map.of(
-                    "expected_yield", EconomicFactor.known(Math.min(1.0D, output.outputCount())),
-                    "probability", EconomicFactor.unknown("villager offer selection is not modeled"),
-                    "reliability", EconomicFactor.known(1.0D)
-                ), horizons, new AcquisitionEvidence(evidence, Map.of("trade_listing", output.sourceId())));
+                Map.ofEntries(
+                    Map.entry("probability", EconomicFactor.notApplicable(
+                        "the player chooses the available listed trade")),
+                    Map.entry("expected_yield", EconomicFactor.known(1.0D)),
+                    Map.entry("repeatability", output.maxUses() > 0
+                        ? EconomicFactor.known(1.0D)
+                        : EconomicFactor.unknown("trade offer has no positive maximum-use limit")),
+                    Map.entry("renewability", EconomicFactor.unknown(
+                        "input-resource acquisition and villager restock conditions are not fully resolved")),
+                    Map.entry("startup_cost", EconomicFactor.notApplicable("trade has no separate startup input")),
+                    Map.entry("recurring_cost", EconomicFactor.notApplicable(
+                        "repeated trade inputs are represented by material economics")),
+                    Map.entry("prerequisite_cost", EconomicFactor.unknown(
+                        "profession and workstation access costs are not resolved")),
+                    Map.entry("processing_requirements", EconomicFactor.notApplicable(
+                        "trade completion is not a recipe-processing operation")),
+                    Map.entry("progression_requirement", EconomicFactor.unknown(
+                        "villager level is recorded but progression costs are not resolved")),
+                    Map.entry("danger", EconomicFactor.unknown(
+                        "villager location and protection requirements are not resolved")),
+                    Map.entry("resource_consumption", output.inputs().isEmpty()
+                        ? EconomicFactor.unknown("fixed trade inputs are unavailable")
+                        : EconomicFactor.known(1.0D)),
+                    Map.entry("intermediate_steps", EconomicFactor.notApplicable(
+                        "trade input economics are direct and do not contain a recipe chain here")),
+                    Map.entry("equipment_availability", EconomicFactor.unknown(
+                        "villager workstation availability is not resolved")),
+                    Map.entry("reliability", EconomicFactor.known(1.0D))
+                ), horizons, new AcquisitionEvidence(evidence, tradeAttributes(output)));
         }).toList();
+    }
+
+    private EconomicFactor materialCost(TradeOutput output, int horizon) {
+        double perOfferCost = 0.0D;
+        List<String> missing = new ArrayList<>();
+        for (TradeInput input : output.inputs()) {
+            Double inputCost = knownInputCosts.get(input.itemId());
+            if (inputCost == null) {
+                missing.add(input.itemId() + ": economic input cost is unresolved");
+            } else {
+                perOfferCost += inputCost * input.quantity();
+            }
+        }
+        if (!missing.isEmpty() || output.inputs().isEmpty()) {
+            return EconomicFactor.unknown(output.inputs().isEmpty()
+                ? "trade input prices were not safely captured"
+                : String.join("; ", missing));
+        }
+        double totalCost = perOfferCost / output.outputCount() * horizon;
+        return FactorNormalizer.logarithmic(totalCost,
+            DynamicFoodConfig.materialCostReference(), DynamicFoodConfig.materialCostCap());
+    }
+
+    private static Map<String, String> tradeAttributes(TradeOutput output) {
+        Map<String, String> attributes = new TreeMap<>();
+        attributes.put("trade_listing", output.sourceId());
+        attributes.put("profession", output.sourceId().substring(0, output.sourceId().indexOf("/level_")));
+        attributes.put("villager_level", Integer.toString(output.level()));
+        attributes.put("maximum_uses", Integer.toString(output.maxUses()));
+        attributes.put("input_prices", output.inputs().toString());
+        attributes.put("price_model", "base listing price; demand, reputation, and temporary discounts excluded");
+        attributes.put("canonical_quantity_source", "output quantity per player-selected completed offer");
+        if (output.priceMultiplier() != null) {
+            attributes.put("dynamic_price_multiplier", Float.toString(output.priceMultiplier()));
+        }
+        return Map.copyOf(attributes);
     }
 
     public int unindexedListingCount() {
@@ -165,36 +263,86 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
             .distinct().sorted().toList();
     }
 
-    private static Optional<ItemStack> fixedOutput(ItemListing listing) {
+    private static Optional<FixedTrade> fixedTrade(ItemListing listing) {
         if (listing.getClass() == BasicItemListing.class) {
-            var offer = listing.getOffer(null, RandomSource.create(0L));
-            return offer == null ? Optional.empty() : Optional.of(offer.getResult().copy());
+            MerchantOffer offer = listing.getOffer(null, RandomSource.create(0L));
+            if (offer == null) {
+                return Optional.empty();
+            }
+            List<ItemStack> inputs = new ArrayList<>();
+            inputs.add(offer.getBaseCostA());
+            ItemStack second = offer.getCostB();
+            if (!second.isEmpty()) {
+                inputs.add(second);
+            }
+            return Optional.of(new FixedTrade(offer.getResult().copy(), inputs,
+                offer.getMaxUses(), offer.getPriceMultiplier()));
         }
-        if (listing.getClass() == VillagerTrades.ItemsForEmeralds.class && VANILLA_FIXED_OUTPUT != null) {
+        if (listing.getClass() == VillagerTrades.ItemsForEmeralds.class
+            && VANILLA_FIXED_OUTPUT != null && VANILLA_EMERALD_COST != null
+            && VANILLA_MAX_USES != null && VANILLA_PRICE_MULTIPLIER != null) {
             try {
                 Object value = VANILLA_FIXED_OUTPUT.get(listing);
-                return value instanceof ItemStack stack ? Optional.of(stack.copy()) : Optional.empty();
+                Object emeraldCost = VANILLA_EMERALD_COST.get(listing);
+                Object maxUses = VANILLA_MAX_USES.get(listing);
+                Object priceMultiplier = VANILLA_PRICE_MULTIPLIER.get(listing);
+                if (value instanceof ItemStack stack && emeraldCost instanceof Integer price && price > 0
+                    && maxUses instanceof Integer uses && priceMultiplier instanceof Float multiplier) {
+                    return Optional.of(new FixedTrade(stack.copy(),
+                        List.of(new ItemStack(Items.EMERALD, price)), uses, multiplier));
+                }
             } catch (IllegalAccessException exception) {
-                DynamicFood.LOGGER.warn("Could not read the verified 1.21.1 fixed villager trade output", exception);
+                DynamicFood.LOGGER.warn("Could not read the verified 1.21.1 fixed villager trade data", exception);
             }
         }
         return Optional.empty();
     }
 
     private static Field findVanillaFixedOutputField() {
+        return findVanillaField("itemStack");
+    }
+
+    private static Field findVanillaField(String name) {
         try {
-            Field field = VillagerTrades.ItemsForEmeralds.class.getDeclaredField("itemStack");
+            Field field = VillagerTrades.ItemsForEmeralds.class.getDeclaredField(name);
             if (!field.trySetAccessible()) {
-                throw new IllegalAccessException("VillagerTrades.ItemsForEmeralds.itemStack is not accessible");
+                throw new IllegalAccessException("VillagerTrades.ItemsForEmeralds." + name + " is not accessible");
             }
             return field;
         } catch (ReflectiveOperationException | RuntimeException exception) {
-            DynamicFood.LOGGER.warn(
-                "Could not access the verified 1.21.1 fixed output for vanilla villager item trades", exception);
+            DynamicFood.LOGGER.warn("Could not access verified 1.21.1 ItemsForEmeralds field {}", name, exception);
             return null;
         }
     }
 
-    private record TradeOutput(String itemId, String sourceId, int outputCount) {
+    private static TradeInput itemInput(ItemStack stack, String sourceId) {
+        var itemKey = BuiltInRegistries.ITEM.getKey(stack.getItem());
+        if (itemKey == null || stack.isEmpty() || stack.getCount() <= 0) {
+            DynamicFood.LOGGER.warn("Villager trade {} has an invalid input stack", sourceId);
+            return null;
+        }
+        return new TradeInput(itemKey.toString(), stack.getCount());
+    }
+
+    private record FixedTrade(ItemStack output, List<ItemStack> inputs, int maxUses, float priceMultiplier) {
+    }
+
+    private record TradeInput(String itemId, int quantity) {
+        private TradeInput {
+            if (itemId == null || quantity <= 0) {
+                throw new IllegalArgumentException("trade inputs require an item id and positive quantity");
+            }
+        }
+    }
+
+    private record TradeOutput(String itemId, String sourceId, int outputCount, List<TradeInput> inputs,
+        int level, int maxUses, Float priceMultiplier) {
+        private TradeOutput {
+            inputs = List.copyOf(inputs);
+        }
+
+        private static TradeOutput unindexed(String sourceId, int level) {
+            return new TradeOutput(null, sourceId, 0, List.of(), level, 0, null);
+        }
     }
 }

@@ -98,6 +98,62 @@ class DynamicFoodEngineTest {
     }
 
     @Test
+    void notApplicableFactorsDoNotReduceCostOrFeasibilityCoverage() {
+        AcquisitionPath path = acquisitionPath("test:item", "test:recipe", true, 1.0D,
+            Map.of(
+                "repeatability", EconomicFactor.known(1.0D),
+                "danger", EconomicFactor.notApplicable("ordinary recipe has no danger exposure"),
+                "progression_requirement", EconomicFactor.notApplicable("no progression gate")
+            ),
+            Map.of("quantity_cost", EconomicFactor.known(0.4D),
+                "probability_cost", EconomicFactor.notApplicable("ordinary recipe has no random drop")), 100);
+
+        FeasibilityResult feasibility = FeasibilityResolver.resolve(path,
+            Map.of("repeatability", 1.0D, "danger", 1.0D, "progression_requirement", 1.0D),
+            1.0D, 0.5D, false);
+        AcquisitionCost cost = AcquisitionCostResolver.resolve(path.costsByHorizon().get(100),
+            Map.of("quantity_cost", 1.0D, "probability_cost", 1.0D));
+
+        assertEquals(1.0D, feasibility.coverage(), 0.0D);
+        assertEquals(ResolutionStatus.COMPLETE, feasibility.status());
+        assertTrue(feasibility.eligibleForPrimary());
+        assertEquals(2, feasibility.notApplicableFactors().size());
+        assertEquals(0.4D, cost.cost(), 0.0D);
+        assertEquals(ResolutionStatus.COMPLETE, cost.status());
+        assertEquals(Map.of("probability_cost", "ordinary recipe has no random drop"),
+            cost.notApplicableFactors());
+    }
+
+    @Test
+    void applicableUnknownFactorsReduceCoverageButAreNotTreatedAsZero() {
+        AcquisitionPath path = acquisitionPath("test:item", "test:loot", true, 1.0D,
+            Map.of(
+                "probability", EconomicFactor.unknown("loot condition is not statically resolvable"),
+                "repeatability", EconomicFactor.known(1.0D)
+            ), Map.of("quantity_cost", EconomicFactor.known(0.5D)), 100);
+
+        FeasibilityResult result = FeasibilityResolver.resolve(path,
+            Map.of("probability", 1.0D, "repeatability", 1.0D), 0.75D, 0.5D, false);
+
+        assertEquals(0.5D, result.coverage(), 0.0D);
+        assertEquals(ResolutionStatus.PARTIAL, result.status());
+        assertTrue(!result.eligibleForPrimary());
+        assertEquals(1, result.missingFactors().size());
+    }
+
+    @Test
+    void economicCostAcceptsUnboundedValuesWhileNormalizedFactorsRemainBounded() {
+        assertEquals(3.5D, new EconomicCostResolution(3.5D, 5.0D, ResolutionStatus.COMPLETE,
+            100, null, List.of(), 1.0D, List.of()).economicCost(), 0.0D);
+        assertEquals(3.5D, new ResourceEconomicProfile("test:ore", "test:ore", 3.5D,
+            1.0D, 1.0D, true, true, SurvivalAcquirability.TRUE, false, false).economicCost(), 0.0D);
+        assertEquals(3.5D, new EconomicProfileOverride("test:ore", 3.5D, 1.0D,
+            "test:ore", SurvivalAcquirability.TRUE).economicCost(), 0.0D);
+        assertThrows(IllegalArgumentException.class,
+            () -> EconomicFactor.known(3.5D));
+    }
+
+    @Test
     void bestRepeatablePathUsesOneHorizonAndMonotonicDifficultyProjection() {
         AcquisitionPath oneOff = acquisitionPath("test:item", "test:one_off", false, 1.0D,
             Map.of("reliability", EconomicFactor.known(1.0D)),
@@ -205,10 +261,32 @@ class DynamicFoodEngineTest {
     }
 
     @Test
-    void explicitlyConfiguredFoodComponentTagCanQualifyWithoutVanillaFoodProperties() {
-        assertTrue(DynamicFoodEngine.isFoodPopulationCandidate(false, true));
-        assertTrue(DynamicFoodEngine.isFoodPopulationCandidate(true, false));
-        assertTrue(!DynamicFoodEngine.isFoodPopulationCandidate(false, false));
+    void survivalEligibilityRequiresAnIndexedSurvivalSource() {
+        SurvivalAcquirabilityResolver resolver = new SurvivalAcquirabilityResolver();
+        AcquisitionPath recipe = new AcquisitionPath("examplemod:diamond", "recipe", "examplemod:diamond",
+            1.0D, null, null, true, false, Map.of(), Map.of());
+        AcquisitionPath eventOnly = new AcquisitionPath("examplemod:event_food", "event_only", "examplemod:event",
+            1.0D, null, null, false, false, Map.of(), Map.of());
+        AcquisitionPath custom = new AcquisitionPath("examplemod:custom", "custom_source", "examplemod:custom",
+            1.0D, null, null, null, false, Map.of(), Map.of());
+
+        assertEquals(SurvivalAcquirability.TRUE, resolver.resolve(List.of(recipe)).state());
+        assertEquals(SurvivalAcquirability.FALSE, resolver.resolve(List.of(eventOnly)).state());
+        assertEquals(SurvivalAcquirability.UNKNOWN, resolver.resolve(List.of(custom)).state());
+        assertEquals(SurvivalAcquirability.UNKNOWN, resolver.resolve(List.of()).state());
+    }
+
+    @Test
+    void economicIdentityResolverDoesNotInferAliasesFromItemIds() {
+        EconomicResourceIdentityResolver resolver = new EconomicResourceIdentityResolver();
+        ResourceEconomicProfile first = calibrationProfile("examplemod:raw_berry", "examplemod:raw_berry",
+            0.4D, 1.0D);
+        ResourceEconomicProfile similarlyNamed = calibrationProfile("othermod:raw_berry",
+            "othermod:raw_berry", 0.4D, 1.0D);
+
+        assertTrue(!resolver.resolve(first).equals(resolver.resolve(similarlyNamed)));
+        assertEquals(new EconomicResourceIdentity("fruit_group"),
+            resolver.resolve(calibrationProfile("examplemod:berry_slice", "fruit_group", 0.4D, 1.0D)));
     }
 
     @Test
@@ -247,6 +325,28 @@ class DynamicFoodEngineTest {
     }
 
     @Test
+    void recursiveRecipeEconomicsRetainRawMagnitudeUntilFinalFactorNormalization() {
+        RecipeGraph graph = new RecipeGraph();
+        graph.add(new RecipeNode("test:ore_to_ingot", "minecraft:crafting", "examplemod:ingot", 1,
+            List.of(), null, List.of(new AcquisitionIngredient(List.of("examplemod:ore"), 2))));
+        graph.add(new RecipeNode("test:ingot_to_plate", "minecraft:crafting", "examplemod:plate", 2,
+            List.of(), 600.0D, List.of(new AcquisitionIngredient(List.of("examplemod:ingot"), 3))));
+        RecipeEconomicAnalyzer economics = new RecipeEconomicAnalyzer(graph,
+            Map.of("examplemod:ore", 4.0D), 1.0D, 100.0D);
+
+        RecipeEconomicResult rawResult = economics.resolve("examplemod:plate");
+        AcquisitionPath path = new RecipeGraphAcquisitionAnalyzer(graph,
+            Map.of("examplemod:ore", 4.0D), 1.0D, 100.0D).analyze("examplemod:plate").getFirst();
+
+        assertEquals(12.0D, rawResult.economicCost(), 0.0D);
+        assertEquals(12.0D, path.evidence().measurements().get("material_cost_per_output").value(), 0.0D);
+        assertEquals(FactorNormalizer.logarithmic(1200.0D, 1.0D, 100.0D),
+            path.costsByHorizon().get(100).factors().get("material_cost"));
+        assertEquals(FactorNormalizer.logarithmic(30000.0D, 200.0D, 72000.0D),
+            path.costsByHorizon().get(100).factors().get("time_cost"));
+    }
+
+    @Test
     void recipeEconomicAnalyzerDoesNotInventCostForAmbiguousTagInputs() {
         RecipeGraph graph = new RecipeGraph();
         graph.add(new RecipeNode("test:tag_recipe", "minecraft:crafting", "examplemod:meal", 1,
@@ -278,7 +378,7 @@ class DynamicFoodEngineTest {
         assertEquals(1, paths.size());
         assertEquals("testmod:berry_to_food", paths.getFirst().sourceId());
         assertEquals("recipe", paths.getFirst().sourceType());
-        assertEquals(FactorNormalizer.logarithmic(0.4D, 1.0D, 100.0D).value(), paths.getFirst()
+        assertEquals(FactorNormalizer.logarithmic(40.0D, 1.0D, 100.0D).value(), paths.getFirst()
             .costsByHorizon().get(100).factors().get("material_cost").value(), 0.0001D);
     }
 
@@ -294,10 +394,12 @@ class DynamicFoodEngineTest {
         CostVector vector = path.costsByHorizon().get(100);
 
         assertEquals(FactorNormalizer.quantityCost(2.0D, 1.0D, 10000.0D),
+            path.costsByHorizon().get(1).factors().get("quantity_cost"));
+        assertEquals(FactorNormalizer.quantityCostForHorizon(2.0D, 100, 1.0D, 10000.0D),
             vector.factors().get("quantity_cost"));
-        assertEquals(FactorNormalizer.logarithmic(300.0D, 200.0D, 72000.0D),
+        assertEquals(FactorNormalizer.logarithmic(30000.0D, 200.0D, 72000.0D),
             vector.factors().get("time_cost"));
-        assertTrue(!vector.factors().get("danger_cost").isKnown());
+        assertTrue(vector.factors().get("danger_cost").isNotApplicable());
     }
 
     @Test
@@ -372,9 +474,9 @@ class DynamicFoodEngineTest {
         assertEquals("examplemod:loot/fishing", fishPaths.getFirst().sourceId());
         assertEquals("fishing", fishPaths.getFirst().sourceType());
         assertEquals("fishing", rodPaths.getFirst().sourceType());
-        assertEquals(FactorNormalizer.quantityCost(0.5D, 1.0D, 100.0D).value(),
+        assertEquals(FactorNormalizer.quantityCostForHorizon(0.5D, 100, 1.0D, 100.0D).value(),
             fishPaths.getFirst().costsByHorizon().get(100).factors().get("quantity_cost").value(), 0.0001D);
-        assertEquals(FactorNormalizer.quantityCost(1.5D, 1.0D, 100.0D).value(),
+        assertEquals(FactorNormalizer.quantityCostForHorizon(1.5D, 100, 1.0D, 100.0D).value(),
             rodPaths.getFirst().costsByHorizon().get(100).factors().get("quantity_cost").value(), 0.0001D);
         assertEquals(null, fishPaths.getFirst().renewability());
     }
@@ -397,7 +499,7 @@ class DynamicFoodEngineTest {
         assertEquals(expectedYieldOnSuccess,
             path.evidence().measurement("expected_yield_on_success").value(), 1.0E-12D);
         assertEquals(0.5D, path.evidence().measurement("expected_units_per_attempt").value(), 1.0E-12D);
-        assertEquals(FactorNormalizer.quantityCost(0.5D, 1.0D, 100.0D),
+        assertEquals(FactorNormalizer.quantityCostForHorizon(0.5D, 100, 1.0D, 100.0D),
             path.costsByHorizon().get(100).factors().get("quantity_cost"));
 
         AcquisitionCost combined = AcquisitionCostResolver.resolve(path.costsByHorizon().get(100),
@@ -462,14 +564,13 @@ class DynamicFoodEngineTest {
         LootTableAcquisitionAnalyzer analyzer = LootTableAcquisitionAnalyzer.fromParsedTables(List.of(
             new LootTableAcquisitionAnalyzer.ParsedTable("examplemod:entities/pig", oneItem),
             new LootTableAcquisitionAnalyzer.ParsedTable("examplemod:gameplay/fishing", oneItem),
-            new LootTableAcquisitionAnalyzer.ParsedTable("examplemod:chests/ruined_portal", oneItem),
-            new LootTableAcquisitionAnalyzer.ParsedTable("examplemod:blocks/wheat", "crop", oneItem)
+            new LootTableAcquisitionAnalyzer.ParsedTable("examplemod:chests/ruined_portal", oneItem)
         ), 1.0D, 100.0D);
 
         List<String> categories = analyzer.analyze("examplemod:food").stream()
             .map(AcquisitionPath::sourceType).sorted().toList();
 
-        assertEquals(List.of("crop", "fishing", "mob_drop", "worldgen"), categories);
+        assertEquals(List.of("fishing", "mob_drop", "worldgen"), categories);
         assertTrue(analyzer.analyze("examplemod:food").stream()
             .allMatch(path -> path.costsByHorizon().get(100).factors().containsKey("quantity_cost")));
     }
@@ -566,7 +667,7 @@ class DynamicFoodEngineTest {
         assertEquals("fruit_group", valid.calibrationGroup());
         assertTrue(valid.toProfile().isCalibrationCandidate());
         assertTrue(!unknownSurvival.toProfile().isCalibrationCandidate());
-        assertEquals(null, EconomicProfileOverride.parse("examplemod:bad|1.2|1.0|-|TRUE"));
+        assertNotNull(EconomicProfileOverride.parse("examplemod:wide_cost|1.2|1.0|-|TRUE"));
         assertEquals(null, EconomicProfileOverride.parse("examplemod:bad|0.2|0.0|-|TRUE"));
     }
 
@@ -632,13 +733,24 @@ class DynamicFoodEngineTest {
             calibrationProfile("test:unresolved", "test:unresolved", null, 2.0D),
             technical, derived, survivalUnknown
         ));
+        CalibrationSnapshot fullyResolved = calibrator.calibrate(List.of(
+            calibrationProfile("test:common", "test:common", 0.1D, 18.0D),
+            calibrationProfile("test:rare", "test:rare", 0.9D, 2.0D)
+        ));
 
         assertEquals(Math.log1p(0.1D), snapshot.p05(), 0.0001D);
         assertEquals(Math.log1p(0.9D), snapshot.p95(), 0.0001D);
         assertEquals(22.0D, snapshot.candidatePopulationWeight(), 0.0D);
         assertEquals(20.0D, snapshot.resolvedPopulationWeight(), 0.0D);
         assertEquals(20.0D / 22.0D, snapshot.calibrationCoverage(), 0.0001D);
+        assertEquals(3, snapshot.populationSize());
+        assertTrue(snapshot.population().stream()
+            .anyMatch(profile -> profile.resourceId().equals("test:unresolved")));
         assertTrue(snapshot.calibratedValues().containsKey("test:common"));
+        assertEquals(fullyResolved.foodIndexFor("test:common").orElseThrow(),
+            snapshot.foodIndexFor("test:common").orElseThrow(), 0.0D);
+        assertEquals(fullyResolved.foodIndexFor("test:rare").orElseThrow(),
+            snapshot.foodIndexFor("test:rare").orElseThrow(), 0.0D);
         assertTrue(!snapshot.calibratedValues().containsKey("test:unresolved"));
         assertTrue(!snapshot.calibratedValues().containsKey("test:machine"));
         assertTrue(!snapshot.calibratedValues().containsKey("test:bread"));
@@ -659,6 +771,20 @@ class DynamicFoodEngineTest {
         assertEquals(snapshot.foodIndexFor("test:berry_a").orElseThrow(),
             snapshot.foodIndexFor("test:berry_b").orElseThrow(), 0.0D);
         assertEquals(CalibrationStatus.DEGENERATE, snapshot.status());
+    }
+
+    @Test
+    void conflictingEconomicsForOneExplicitIdentityAreRejected() {
+        FoodValueCalibrator calibrator = new FoodValueCalibrator(1, 0.70D, 0.30D, 0.05D, 0.95D, 0.50D, 0.80D);
+
+        assertThrows(IllegalArgumentException.class, () -> calibrator.calibrate(List.of(
+            calibrationProfile("test:berry_a", "test:berry_group", 0.4D, 1.0D),
+            calibrationProfile("test:berry_b", "test:berry_group", 0.5D, 1.0D)
+        )));
+        assertThrows(IllegalArgumentException.class, () -> calibrator.calibrate(List.of(
+            calibrationProfile("test:berry_a", "test:berry_group", 0.4D, 1.0D),
+            calibrationProfile("test:berry_b", "test:berry_group", 0.4D, 2.0D)
+        )));
     }
 
     @Test
@@ -1060,6 +1186,26 @@ class DynamicFoodEngineTest {
 
         assertEquals(4.0D, mixed.nutritionOverrideOr(8.0D), 0.0D);
         assertEquals(2.5D, mixed.saturationOverrideOr(2.5D), 0.0D);
+    }
+
+    @Test
+    void localFoodOverrideDoesNotChangeGlobalCalibrationSnapshot() {
+        FoodValueCalibrator calibrator = new FoodValueCalibrator(1, 0.70D, 0.30D, 0.05D, 0.95D, 0.50D, 0.80D);
+        List<ResourceEconomicProfile> population = List.of(
+            calibrationProfile("test:bread", "test:bread", 0.2D, 1.0D),
+            calibrationProfile("test:berries", "test:berries", 0.6D, 1.0D)
+        );
+        CalibrationSnapshot before = calibrator.calibrate(population);
+        ItemFoodProfile localOverride = ItemFoodProfile.parse("test:bread|8.0|4.0|0|true|true");
+        assertEquals(8.0D, localOverride.nutritionOverrideOr(2.0D), 0.0D);
+        CalibrationSnapshot after = calibrator.calibrate(population);
+
+        assertEquals(before.signature(), after.signature());
+        assertEquals(before.p05(), after.p05(), 0.0D);
+        assertEquals(before.p50(), after.p50(), 0.0D);
+        assertEquals(before.p95(), after.p95(), 0.0D);
+        assertEquals(before.calibratedValues(), after.calibratedValues());
+        assertEquals(before.population(), after.population());
     }
 
     @Test

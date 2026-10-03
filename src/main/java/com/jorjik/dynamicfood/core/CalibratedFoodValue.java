@@ -7,7 +7,7 @@ public record CalibratedFoodValue(
     double foodIndex
 ) {
     public CalibratedFoodValue {
-        if (!Double.isFinite(economicCost) || economicCost < 0.0D || economicCost > 1.0D
+        if (!Double.isFinite(economicCost) || economicCost < 0.0D
             || !unit(magnitudeComponent) || !unit(rankComponent) || !unit(foodIndex)) {
             throw new IllegalArgumentException("calibrated values must be finite and in their documented ranges");
         }

@@ -15,9 +15,11 @@ import java.util.ArrayList;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.entity.npc.VillagerTrades.ItemListing;
 import net.neoforged.neoforge.fluids.FluidStack;
+import net.minecraft.world.level.block.EntityBlock;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -111,6 +113,8 @@ public final class DynamicFoodEngine {
         cache.clear();
         economicResolutionCache.clear();
         acquisitionPathCache.clear();
+        recipeEconomicAnalyzer = null;
+        recipeGraphAcquisitionAnalyzer = null;
     }
 
     public synchronized void rebuildCalibration(Collection<ResourceEconomicProfile> profiles,
@@ -121,6 +125,8 @@ public final class DynamicFoodEngine {
         Map<String, ResourceEconomicProfile> byItem = new HashMap<>();
         profiles.forEach(profile -> byItem.put(profile.resourceId(), profile));
         economicProfiles = Map.copyOf(byItem);
+        villagerTradeAcquisitionAnalyzer = villagerTradeAcquisitionAnalyzer
+            .withInputCosts(knownEconomicCosts(economicProfiles));
         recipeEconomicAnalyzer = null;
         recipeGraphAcquisitionAnalyzer = null;
         if (lootTableAcquisitionAnalyzer != null) {
@@ -140,6 +146,8 @@ public final class DynamicFoodEngine {
         Map<String, ResourceEconomicProfile> configuredByItem = new HashMap<>();
         configuredProfiles.forEach(profile -> configuredByItem.put(profile.resourceId(), profile));
         economicProfiles = Map.copyOf(configuredByItem);
+        villagerTradeAcquisitionAnalyzer = villagerTradeAcquisitionAnalyzer
+            .withInputCosts(knownEconomicCosts(economicProfiles));
         recipeEconomicAnalyzer = null;
         recipeGraphAcquisitionAnalyzer = null;
         economicResolutionCache.clear();
@@ -148,13 +156,18 @@ public final class DynamicFoodEngine {
         List<TagKey<Item>> populationTags = parseCalibrationPopulationTags(settings.populationTags());
         List<ResourceEconomicProfile> population = new ArrayList<>();
         Map<String, ResourceEconomicProfile> allProfiles = new HashMap<>(configuredByItem);
-        int foodItems = 0;
+        int candidateItems = 0;
         int derivedExcluded = 0;
         int sourceExcluded = 0;
         int unknownCostExcluded = 0;
         int automaticallyIncluded = 0;
         int configuredScopeExcluded = 0;
         int automaticScopeExcluded = 0;
+        int technicalExcluded = 0;
+        int survivalFalseExcluded = 0;
+        int survivalUnknownExcluded = 0;
+        Map<String, Integer> survivalExclusionReasons = new java.util.TreeMap<>();
+        SurvivalAcquirabilityResolver survivalResolver = new SurvivalAcquirabilityResolver();
         for (ResourceEconomicProfile profile : configuredByItem.values()) {
             Item item = itemForId(profile.resourceId());
             boolean matchesTag = item != null && matchesAnyTag(item, populationTags);
@@ -180,13 +193,17 @@ public final class DynamicFoodEngine {
                     continue;
                 }
                 Item item = itemForId(itemId);
-                if (item == null || !isFoodPopulationCandidate(
-                    new ItemStack(item).get(DataComponents.FOOD) != null, hasConfiguredFoodTag(item))) {
+                if (item == null) {
                     continue;
                 }
-                foodItems++;
+                candidateItems++;
                 if (!settings.allowsAutomaticCandidate(matchesAnyTag(item, populationTags))) {
                     automaticScopeExcluded++;
+                    continue;
+                }
+                ItemStack candidateStack = new ItemStack(item);
+                if (isTechnicalResource(candidateStack)) {
+                    technicalExcluded++;
                     continue;
                 }
                 List<AcquisitionPath> discoveredPaths = acquisitionPaths(itemId);
@@ -198,6 +215,16 @@ public final class DynamicFoodEngine {
                     derivedExcluded++;
                     continue;
                 }
+                SurvivalAcquirabilityResolver.Result survival = survivalResolver.resolve(discoveredPaths);
+                if (survival.state() != SurvivalAcquirability.TRUE) {
+                    if (survival.state() == SurvivalAcquirability.FALSE) {
+                        survivalFalseExcluded++;
+                    } else {
+                        survivalUnknownExcluded++;
+                    }
+                    survivalExclusionReasons.merge(survival.explanation(), 1, Integer::sum);
+                    continue;
+                }
                 EconomicCostResolution resolution = economicCostResolution(itemId);
                 if (resolution.status() != ResolutionStatus.COMPLETE || resolution.economicCost() == null) {
                     unknownCostExcluded++;
@@ -205,7 +232,7 @@ public final class DynamicFoodEngine {
                 }
                 ResourceEconomicProfile profile = new ResourceEconomicProfile(itemId, itemId,
                     resolution.economicCost(), resolution.confidence(), 1.0D, true, true,
-                    SurvivalAcquirability.TRUE, false, false);
+                    survival.state(), false, false);
                 population.add(profile);
                 allProfiles.put(itemId, profile);
                 automaticallyIncluded++;
@@ -214,6 +241,8 @@ public final class DynamicFoodEngine {
 
         rebuildCalibration(population, settings);
         economicProfiles = Map.copyOf(allProfiles);
+        villagerTradeAcquisitionAnalyzer = villagerTradeAcquisitionAnalyzer
+            .withInputCosts(knownEconomicCosts(economicProfiles));
         economicResolutionCache.clear();
         acquisitionPathCache.clear();
         Map<String, Integer> sourceCounts = lootTableAcquisitionAnalyzer == null
@@ -229,8 +258,13 @@ public final class DynamicFoodEngine {
             "Discovery scope: registered items with vanilla FOOD components and indexed standard recipe, loot, biome/placed-feature worldgen, and fixed-output villager-trade data",
             "Configured profiles: " + configuredByItem.size(),
             "Configured profiles excluded by population scope: " + configuredScopeExcluded,
-            "Edible registry items considered for automatic discovery: " + foodItems,
+            "Indexed registry resources considered for automatic discovery (food metadata is not required): "
+                + candidateItems,
             "Automatic candidates excluded by population scope: " + automaticScopeExcluded,
+            "Excluded technical items (damageable, block-entity, or item-container resources): " + technicalExcluded,
+            "Excluded without proven survival acquisition: FALSE=" + survivalFalseExcluded
+                + ", UNKNOWN=" + survivalUnknownExcluded,
+            "Survival eligibility decisions: " + survivalExclusionReasons,
             "Automatically discovered terminal profiles: " + automaticallyIncluded,
             "Excluded derived recipe outputs: " + derivedExcluded,
             "Excluded without indexed acquisition paths: " + sourceExcluded,
@@ -272,17 +306,10 @@ public final class DynamicFoodEngine {
         return paths.stream().anyMatch(path -> !path.sourceType().equals("recipe"));
     }
 
-    static boolean isFoodPopulationCandidate(boolean hasVanillaFood, boolean hasConfiguredFoodTag) {
-        return hasVanillaFood || hasConfiguredFoodTag;
-    }
-
-    private static boolean hasConfiguredFoodTag(Item item) {
-        ItemStack stack = new ItemStack(item);
-        return DynamicFoodConfig.strings(DynamicFoodConfig.FOOD_COMPONENT_TAGS, List.of()).stream()
-            .map(ResourceLocation::tryParse)
-            .filter(java.util.Objects::nonNull)
-            .map(location -> TagKey.create(Registries.ITEM, location))
-            .anyMatch(stack::is);
+    public static boolean isTechnicalResource(ItemStack stack) {
+        return stack.isDamageableItem()
+            || stack.getItem() instanceof BlockItem blockItem && blockItem.getBlock() instanceof EntityBlock
+            || stack.has(DataComponents.CONTAINER);
     }
 
     public List<String> calibrationDiscoveryDiagnostics() {
@@ -321,6 +348,14 @@ public final class DynamicFoodEngine {
 
     public FoodCalibrationSettings calibrationSettings() {
         return calibrationSettings;
+    }
+
+    public Optional<ResourceEconomicProfile> economicProfile(String itemId) {
+        return Optional.ofNullable(economicProfiles.get(itemId));
+    }
+
+    public SurvivalAcquirabilityResolver.Result survivalAcquirability(String itemId) {
+        return new SurvivalAcquirabilityResolver().resolve(acquisitionPaths(itemId));
     }
 
     public RecipeEconomicResult recipeEconomicResult(String itemId) {
@@ -388,6 +423,16 @@ public final class DynamicFoodEngine {
             }
         }
         return paths.stream().sorted(java.util.Comparator.comparing(AcquisitionPath::sourceId)).toList();
+    }
+
+    private static Map<String, Double> knownEconomicCosts(Map<String, ResourceEconomicProfile> profiles) {
+        Map<String, Double> costs = new HashMap<>();
+        profiles.forEach((itemId, profile) -> {
+            if (profile.economicCost() != null) {
+                costs.put(itemId, profile.economicCost());
+            }
+        });
+        return Map.copyOf(costs);
     }
 
     public ResourceDifficulty resourceDifficulty(String itemId) {

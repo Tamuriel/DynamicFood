@@ -13,7 +13,7 @@ public record EconomicProfileOverride(String itemId, double economicCost, double
         try {
             double cost = Double.parseDouble(parts[1].trim());
             double weight = Double.parseDouble(parts[2].trim());
-            if (!Double.isFinite(cost) || cost < 0.0D || cost > 1.0D
+            if (!Double.isFinite(cost) || cost < 0.0D
                 || !Double.isFinite(weight) || weight <= 0.0D) {
                 return null;
             }

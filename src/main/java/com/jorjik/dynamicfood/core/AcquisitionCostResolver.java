@@ -2,6 +2,7 @@ package com.jorjik.dynamicfood.core;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.TreeMap;
 
 public final class AcquisitionCostResolver {
     private AcquisitionCostResolver() {}
@@ -12,14 +13,20 @@ public final class AcquisitionCostResolver {
         double configuredWeight = 0.0D;
         Map<String, Double> used = new LinkedHashMap<>();
         Map<String, String> missing = new LinkedHashMap<>();
+        Map<String, String> notApplicable = new LinkedHashMap<>();
         EconomicFactor canonicalQuantity = vector.factors().get("quantity_cost");
         boolean quantityKnown = canonicalQuantity != null && canonicalQuantity.isKnown();
-        for (Map.Entry<String, Double> entry : factorWeights.entrySet()) {
+        for (Map.Entry<String, Double> entry : new TreeMap<>(factorWeights).entrySet()) {
             double weight = entry.getValue();
             if (!Double.isFinite(weight) || weight < 0.0D) {
                 throw new IllegalArgumentException("factor weights must be finite and non-negative");
             }
             if (weight == 0.0D) {
+                continue;
+            }
+            EconomicFactor factor = vector.factors().get(entry.getKey());
+            if (factor != null && factor.isNotApplicable()) {
+                notApplicable.put(entry.getKey(), factor.reason());
                 continue;
             }
             if (quantityKnown && (entry.getKey().equals("probability_cost")
@@ -28,9 +35,9 @@ public final class AcquisitionCostResolver {
                 continue;
             }
             configuredWeight += weight;
-            EconomicFactor factor = vector.factors().get(entry.getKey());
             if (factor == null || !factor.isKnown()) {
-                missing.put(entry.getKey(), factor == null ? "factor not provided" : factor.reason());
+                missing.put(entry.getKey(), factor == null
+                    ? "applicability was not reported by the acquisition analyzer" : factor.reason());
                 continue;
             }
             weightedCost += factor.value() * weight;
@@ -38,12 +45,15 @@ public final class AcquisitionCostResolver {
             used.put(entry.getKey(), factor.value());
         }
         if (configuredWeight <= 0.0D) {
-            throw new IllegalArgumentException("at least one acquisition cost factor weight must be positive");
+            return new AcquisitionCost(null, ResolutionStatus.UNKNOWN, vector.economicHorizon(), used,
+                missing, notApplicable);
         }
         if (knownWeight == 0.0D) {
-            return new AcquisitionCost(null, ResolutionStatus.UNKNOWN, vector.economicHorizon(), used, missing);
+            return new AcquisitionCost(null, ResolutionStatus.UNKNOWN, vector.economicHorizon(), used,
+                missing, notApplicable);
         }
         ResolutionStatus status = knownWeight == configuredWeight ? ResolutionStatus.COMPLETE : ResolutionStatus.PARTIAL;
-        return new AcquisitionCost(weightedCost / knownWeight, status, vector.economicHorizon(), used, missing);
+        return new AcquisitionCost(weightedCost / knownWeight, status, vector.economicHorizon(), used,
+            missing, notApplicable);
     }
 }

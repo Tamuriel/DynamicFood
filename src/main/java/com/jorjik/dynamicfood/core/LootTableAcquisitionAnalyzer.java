@@ -86,8 +86,9 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
             if (source.expectedUnitsPerAttempt() == null) {
                 Map<Integer, CostVector> unknownHorizons = new HashMap<>();
                 for (int horizon : supportedHorizons()) {
-                    unknownHorizons.put(horizon, lootCostVector(horizon, EconomicFactor.unknown(
-                        "conditional or function-based loot yield is not statically measurable")));
+                    unknownHorizons.put(horizon, lootCostVector(horizon,
+                        EconomicFactor.unknown("conditional or function-based loot yield is not statically measurable"),
+                        null, null));
                 }
                 Map<String, AcquisitionMeasurement> unknownEvidence = new HashMap<>(Map.of(
                     "probability", AcquisitionMeasurement.unknown("loot conditions or weighted selection are not evaluated"),
@@ -99,18 +100,13 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                     unknownEvidence.put("expected_attempts_to_obtain_" + horizon,
                         AcquisitionMeasurement.unknown("expected yield is unknown"));
                 }
+                addCropMeasurements(source, unknownEvidence);
                 return new AcquisitionPath(itemId, source.sourceType(), source.tableId(), 0.5D,
                     null, null, null, false,
-                    Map.of(
-                        "probability", EconomicFactor.unknown("loot conditions are not evaluated"),
-                        "expected_yield", EconomicFactor.unknown("loot functions or conditions are not evaluated")
-                    ),
+                    lootFeasibilityFactors(
+                        EconomicFactor.unknown("loot conditions are not evaluated"),
+                        EconomicFactor.unknown("loot functions or conditions are not evaluated")),
                     unknownHorizons, new AcquisitionEvidence(unknownEvidence, lootAttributes(source)));
-            }
-            EconomicFactor quantity = FactorNormalizer.quantityCost(
-                source.expectedUnitsPerAttempt(), attemptsReference, attemptsCap);
-            if (!quantity.isKnown()) {
-                return null;
             }
             LootEvidence loot = source.evidence();
             EconomicFactor probability = loot == null
@@ -120,12 +116,12 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 ? EconomicFactor.unknown("conditional loot yield is not available")
                 : EconomicFactor.known(Math.min(1.0D, loot.expectedYieldOnSuccess()));
             Map<String, EconomicFactor> feasibility = new HashMap<>();
-            feasibility.put("probability", probability);
-            feasibility.put("expected_yield", yield);
-            feasibility.put("reliability", EconomicFactor.known(1.0D));
+            feasibility.putAll(lootFeasibilityFactors(probability, yield));
             Map<Integer, CostVector> horizons = new HashMap<>();
             for (int horizon : supportedHorizons()) {
-                horizons.put(horizon, lootCostVector(horizon, quantity,
+                horizons.put(horizon, lootCostVector(horizon,
+                    FactorNormalizer.quantityCostForHorizon(source.expectedUnitsPerAttempt(), horizon,
+                        attemptsReference, attemptsCap),
                     loot == null ? null : loot.probability(),
                     loot == null ? null : loot.expectedYieldOnSuccess()));
             }
@@ -144,38 +140,115 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 measurements.put("expected_attempts_to_obtain_" + horizon,
                     AcquisitionMeasurement.known(horizon / source.expectedUnitsPerAttempt()));
             }
+            addCropMeasurements(source, measurements);
             return new AcquisitionPath(itemId, source.sourceType(), source.tableId(), 1.0D,
                 null, null, null, false, feasibility, horizons,
                 new AcquisitionEvidence(measurements, lootAttributes(source)));
         }).filter(java.util.Objects::nonNull).toList();
     }
 
-    private CostVector lootCostVector(int horizon, EconomicFactor quantity) {
-        return lootCostVector(horizon, quantity, null, null);
-    }
-
     private CostVector lootCostVector(int horizon, EconomicFactor quantity,
         Double probability, Double expectedYield) {
         Map<String, EconomicFactor> factors = new HashMap<>();
         factors.put("quantity_cost", quantity);
-        factors.put("probability_cost", probability == null
-            ? EconomicFactor.unknown("exact probability unavailable")
-            : FactorNormalizer.logarithmic(1.0D / probability, attemptsReference, attemptsCap));
-        factors.put("yield_cost", expectedYield == null || expectedYield <= 0.0D
-            ? EconomicFactor.unknown("conditional yield unavailable")
-            : FactorNormalizer.logarithmic(1.0D / expectedYield, attemptsReference, attemptsCap));
-        for (String factor : List.of("time_cost", "startup_cost", "recurring_cost", "prerequisite_cost",
-            "progression_cost", "equipment_cost", "danger_cost", "transport_cost", "intermediate_cost",
-            "resource_consumption_cost", "material_cost")) {
-            factors.put(factor, EconomicFactor.unknown("not observable from loot-table data"));
-        }
+        boolean canonicalQuantityKnown = quantity.isKnown();
+        factors.put("probability_cost", canonicalQuantityKnown
+            ? EconomicFactor.notApplicable("probability is already represented by expected units per attempt")
+            : EconomicFactor.unknown(probability == null
+                ? "probability is unknown and canonical expected quantity cannot be calculated"
+                : "probability is measured but dynamic loot behavior prevents canonical expected quantity"));
+        factors.put("yield_cost", canonicalQuantityKnown
+            ? EconomicFactor.notApplicable("conditional yield is already represented by expected units per attempt")
+            : EconomicFactor.unknown(expectedYield == null
+                ? "conditional yield is unknown and canonical expected quantity cannot be calculated"
+                : "conditional yield is measured but dynamic loot behavior prevents canonical expected quantity"));
+        factors.put("time_cost", EconomicFactor.unknown("loot-table data does not expose time per acquisition attempt"));
+        factors.put("startup_cost", EconomicFactor.notApplicable(
+            "loot-table definitions do not describe one-time source setup"));
+        factors.put("recurring_cost", EconomicFactor.unknown(
+            "source-specific recurring inputs and tool replacement are not represented in loot tables"));
+        factors.put("prerequisite_cost", EconomicFactor.unknown(
+            "source access requirements are not represented by loot output data"));
+        factors.put("progression_cost", EconomicFactor.unknown(
+            "source progression requirements are not represented by loot output data"));
+        factors.put("equipment_cost", EconomicFactor.unknown(
+            "required tools or equipment are not represented by loot output data"));
+        factors.put("danger_cost", EconomicFactor.unknown(
+            "source-specific danger is not represented by loot output data"));
+        factors.put("transport_cost", EconomicFactor.unknown(
+            "source accessibility and travel distance are not represented by loot output data"));
+        factors.put("intermediate_cost", EconomicFactor.notApplicable(
+            "loot functions describe the output rather than recursive recipe inputs"));
+        factors.put("resource_consumption_cost", EconomicFactor.unknown(
+            "source-specific consumables are not represented by loot output data"));
+        factors.put("material_cost", EconomicFactor.unknown(
+            "source-specific inputs are not represented by loot output data"));
         return new CostVector(horizon, factors);
+    }
+
+    private static void addCropMeasurements(LootSource source, Map<String, AcquisitionMeasurement> measurements) {
+        if (!source.sourceType().equals("crop")) {
+            return;
+        }
+        CropBlock crop = cropBlock(source);
+        measurements.put("crop_max_age", crop == null
+            ? AcquisitionMeasurement.unknown("crop block type is no longer available in the current registry")
+            : AcquisitionMeasurement.known(crop.getMaxAge()));
+        measurements.put("crop_harvest_expected_units_per_cycle", source.expectedUnitsPerAttempt() == null
+            ? AcquisitionMeasurement.unknown("crop loot functions or conditions prevent exact yield calculation")
+            : AcquisitionMeasurement.known(source.expectedUnitsPerAttempt()));
+        measurements.put("crop_growth_time_ticks", AcquisitionMeasurement.unknown(
+            "CropBlock random-tick growth depends on runtime environment and random tick settings"));
+        measurements.put("crop_seed_return_per_cycle", AcquisitionMeasurement.unknown(
+            "loot output is indexed per item, but seed identity and the replanting loop are not proven"));
+    }
+
+    private static CropBlock cropBlock(LootSource source) {
+        ResourceLocation tableId = ResourceLocation.tryParse(source.tableId());
+        if (tableId == null || !tableId.getPath().startsWith("blocks/")) {
+            return null;
+        }
+        String blockPath = tableId.getPath().substring("blocks/".length());
+        ResourceLocation blockId = ResourceLocation.fromNamespaceAndPath(tableId.getNamespace(), blockPath);
+        var block = BuiltInRegistries.BLOCK.getOptional(blockId).orElse(null);
+        return block instanceof CropBlock crop ? crop : null;
+    }
+
+    private static Map<String, EconomicFactor> lootFeasibilityFactors(
+        EconomicFactor probability, EconomicFactor expectedYield) {
+        return Map.ofEntries(
+            Map.entry("probability", probability),
+            Map.entry("expected_yield", expectedYield),
+            Map.entry("repeatability", EconomicFactor.unknown(
+                "loot data does not establish whether the source can be repeated")),
+            Map.entry("renewability", EconomicFactor.unknown(
+                "loot data does not establish source renewability")),
+            Map.entry("startup_cost", EconomicFactor.notApplicable("loot tables do not describe source setup")),
+            Map.entry("recurring_cost", EconomicFactor.unknown(
+                "recurring source inputs are not represented in loot data")),
+            Map.entry("prerequisite_cost", EconomicFactor.unknown(
+                "source access prerequisites are not represented in loot data")),
+            Map.entry("processing_requirements", EconomicFactor.notApplicable(
+                "loot output generation is not a recipe processing operation")),
+            Map.entry("progression_requirement", EconomicFactor.unknown(
+                "source progression requirements are not represented in loot data")),
+            Map.entry("danger", EconomicFactor.unknown("source danger is not represented in loot data")),
+            Map.entry("resource_consumption", EconomicFactor.unknown(
+                "source consumables are not represented in loot data")),
+            Map.entry("intermediate_steps", EconomicFactor.notApplicable(
+                "loot output generation has no recursive recipe step")),
+            Map.entry("equipment_availability", EconomicFactor.unknown(
+                "source equipment requirements are not represented in loot data")),
+            Map.entry("reliability", EconomicFactor.known(1.0D))
+        );
     }
 
     private static Map<String, String> lootAttributes(LootSource source) {
         Map<String, String> attributes = new HashMap<>();
         attributes.put("loot_table", source.tableId());
         attributes.put("source_type", source.sourceType());
+        attributes.put("canonical_quantity_source", "expected_units_per_attempt");
+        attributes.put("quantity_derived_from", "loot probability, conditional yield, stack count, and roll count");
         ResourceLocation tableId = ResourceLocation.tryParse(source.tableId());
         if (tableId == null) {
             return Map.copyOf(attributes);
@@ -189,6 +262,10 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         } else if (source.sourceType().equals("crop") && path.startsWith("blocks/")) {
             attributes.put("source_block", tableId.getNamespace() + ":"
                 + path.substring("blocks/".length()));
+            CropBlock crop = cropBlock(source);
+            if (crop != null) {
+                attributes.put("crop_max_age", Integer.toString(crop.getMaxAge()));
+            }
             attributes.put("growth_time", "unknown: CropBlock data does not specify a deterministic tick duration");
             attributes.put("seed_return", "loot output can be observed; seed-return loop is not independently modeled");
         } else if (source.sourceType().equals("worldgen") && path.startsWith("chests/")) {

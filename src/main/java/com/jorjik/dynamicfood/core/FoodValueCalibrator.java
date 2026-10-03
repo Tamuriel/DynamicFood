@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 public final class FoodValueCalibrator {
+    private final EconomicResourceIdentityResolver identityResolver = new EconomicResourceIdentityResolver();
     private final int minimumPopulation;
     private final double magnitudeWeight;
     private final double rankWeight;
@@ -53,11 +54,16 @@ public final class FoodValueCalibrator {
         Map<String, List<ResourceEconomicProfile>> groups = new TreeMap<>();
         for (ResourceEconomicProfile resource : resources) {
             if (resource.isCalibrationCandidate()) {
-                groups.computeIfAbsent(resource.economicResourceIdentity(), ignored -> new ArrayList<>()).add(resource);
+                String identity = identityResolver.resolve(resource).value();
+                groups.computeIfAbsent(identity, ignored -> new ArrayList<>()).add(resource);
             }
         }
 
         List<Entity> candidates = new ArrayList<>();
+        List<ResourceEconomicProfile> population = groups.values().stream()
+            .map(aliases -> aliases.stream().sorted(Comparator.comparing(ResourceEconomicProfile::resourceId))
+                .findFirst().orElseThrow())
+            .toList();
         double candidateWeight = 0.0D;
         double resolvedWeight = 0.0D;
         for (Map.Entry<String, List<ResourceEconomicProfile>> grouped : groups.entrySet()) {
@@ -93,7 +99,8 @@ public final class FoodValueCalibrator {
             : coverage < mediumCoverageThreshold ? CalibrationCoverageStatus.MEDIUM : CalibrationCoverageStatus.HIGH;
 
         if (candidates.isEmpty()) {
-            return new CalibrationSnapshot(List.of(), 0, candidateWeight, resolvedWeight, coverage, coverageStatus,
+            return new CalibrationSnapshot(population, population.size(), candidateWeight, resolvedWeight,
+                coverage, coverageStatus,
                 0.0D, 0.0D, 0.0D, magnitudeWeight, rankWeight, CalibrationStatus.EMPTY, Map.of(),
                 signature(groups), "medium", FoodValueCurve.preset("medium", false),
                 FoodValueCurve.preset("medium", true), "weighted_midrank_exact_cost_ties");
@@ -124,10 +131,7 @@ public final class FoodValueCalibrator {
             }
         }
 
-        List<ResourceEconomicProfile> population = candidates.stream()
-            .map(candidate -> candidate.aliases().getFirst())
-            .toList();
-        return new CalibrationSnapshot(population, candidates.size(), candidateWeight, resolvedWeight, coverage,
+        return new CalibrationSnapshot(population, population.size(), candidateWeight, resolvedWeight, coverage,
             coverageStatus, p05, p50, p95, magnitudeWeight, rankWeight, status, calibratedValues,
             signature(groups), "medium", FoodValueCurve.preset("medium", false),
             FoodValueCurve.preset("medium", true), "weighted_midrank_exact_cost_ties");

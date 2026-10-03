@@ -108,7 +108,7 @@ public final class EconomicCostResolver {
         List<AcquisitionPath> alternatives = eligible.stream().map(ResolvedPath::path)
             .filter(path -> !path.sourceId().equals(representative.path().sourceId())).toList();
         reasons.add("economic cost resolved from " + strategyPaths.size() + " path(s) at horizon " + horizon);
-        return new EconomicCostResolution(economicCost, 5.0D * economicCost, status, horizon,
+        return new EconomicCostResolution(economicCost, Math.min(5.0D, 5.0D * economicCost), status, horizon,
             representative.path(), alternatives, Math.max(0.0D, Math.min(1.0D, confidence)), reasons);
     }
 
