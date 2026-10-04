@@ -2,6 +2,7 @@ package com.jorjik.dynamicfood.provenance;
 
 import com.jorjik.dynamicfood.DynamicFood;
 import com.jorjik.dynamicfood.config.DynamicFoodConfig;
+import com.jorjik.dynamicfood.core.EconomicGenerationPublisher;
 import com.jorjik.dynamicfood.core.IngredientContribution;
 import java.util.ArrayList;
 import java.util.List;
@@ -13,19 +14,33 @@ import net.minecraft.world.item.crafting.RecipeType;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 
 public final class CraftingProvenanceHandler {
+    private final EconomicGenerationPublisher generationPublisher;
+
+    public CraftingProvenanceHandler() {
+        this(DynamicFood.ECONOMIC_GENERATIONS);
+    }
+
+    public CraftingProvenanceHandler(EconomicGenerationPublisher generationPublisher) {
+        if (generationPublisher == null) {
+            throw new IllegalArgumentException("economic generation publisher is required");
+        }
+        this.generationPublisher = generationPublisher;
+    }
+
     public void onItemCrafted(PlayerEvent.ItemCraftedEvent event) {
         ItemStack result = event.getCrafting();
         if (result.isEmpty()) {
             return;
         }
 
+        RuntimeEconomicContext economicContext = RuntimeEconomicContext.capture(generationPublisher);
         List<IngredientContribution> actualInputs = new ArrayList<>();
         for (int slot = 0; slot < event.getInventory().getContainerSize(); slot++) {
             ItemStack input = event.getInventory().getItem(slot);
             if (input.isEmpty()) {
                 continue;
             }
-            actualInputs.add(RuntimeFoodApplier.contribution(input, 1));
+            actualInputs.add(RuntimeFoodApplier.contribution(input, 1, economicContext));
         }
         if (actualInputs.isEmpty()) {
             return;
@@ -55,7 +70,7 @@ public final class CraftingProvenanceHandler {
             result.getCount(),
             actualInputs
         );
-        RuntimeFoodApplier.apply(result, provenance);
+        RuntimeFoodApplier.apply(result, provenance, economicContext);
     }
 
 }

@@ -70,6 +70,11 @@ public record AcquisitionPath(
                 + economicCost.observationHorizon() + ", not " + observationHorizon);
     }
 
+    public AcquisitionPath withEvidence(AcquisitionEvidence updatedEvidence) {
+        return new AcquisitionPath(itemId, sourceType, sourceId, confidence, renewability, risk, repeatable,
+            hardFailed, feasibilityFactors, costsByHorizon, updatedEvidence, economicCost, economicCostSchedule);
+    }
+
     private static boolean unit(double value) {
         return Double.isFinite(value) && value >= 0.0D && value <= 1.0D;
     }

@@ -17,8 +17,8 @@ public record EconomicCost(
                 throw new IllegalArgumentException("unknown economic cost requires an explanation");
             }
         } else {
-            if (!Double.isFinite(value) || value < 0.0D) {
-                throw new IllegalArgumentException("economic cost must be finite and non-negative");
+            if (!Double.isFinite(value) || value < 0.0D || value > 1.0D) {
+                throw new IllegalArgumentException("economic cost must be finite and in [0,1]");
             }
             if (primitiveId == null || primitiveId.isBlank() || observationHorizon == null
                 || observationHorizon < 1 || evidence == null || evidence.isBlank()) {

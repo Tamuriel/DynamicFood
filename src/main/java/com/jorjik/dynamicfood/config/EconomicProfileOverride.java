@@ -5,6 +5,16 @@ import com.jorjik.dynamicfood.core.SurvivalAcquirability;
 
 public record EconomicProfileOverride(String itemId, double economicCost, double calibrationWeight,
     String calibrationGroup, SurvivalAcquirability survivalAcquirability) {
+    public EconomicProfileOverride {
+        if (itemId == null || itemId.isBlank() || !Double.isFinite(economicCost)
+            || economicCost < 0.0D || economicCost > 1.0D
+            || !Double.isFinite(calibrationWeight) || calibrationWeight <= 0.0D
+            || calibrationGroup == null || calibrationGroup.isBlank() || survivalAcquirability == null) {
+            throw new IllegalArgumentException("economic profile override requires valid identity, cost in [0,1], "
+                + "positive calibration weight, group and survival state");
+        }
+    }
+
     public static EconomicProfileOverride parse(String entry) {
         String[] parts = entry == null ? new String[0] : entry.split("\\|", -1);
         if (parts.length != 5 || parts[0].isBlank()) {
@@ -13,7 +23,7 @@ public record EconomicProfileOverride(String itemId, double economicCost, double
         try {
             double cost = Double.parseDouble(parts[1].trim());
             double weight = Double.parseDouble(parts[2].trim());
-            if (!Double.isFinite(cost) || cost < 0.0D
+            if (!Double.isFinite(cost) || cost < 0.0D || cost > 1.0D
                 || !Double.isFinite(weight) || weight <= 0.0D) {
                 return null;
             }

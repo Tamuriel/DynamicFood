@@ -20,6 +20,10 @@ public final class ItemStackFoodResolver {
     private ItemStackFoodResolver() {}
 
     public static IngredientContribution resolve(ItemStack stack) {
+        return resolve(stack, null);
+    }
+
+    public static IngredientContribution resolve(ItemStack stack, RuntimeEconomicContext context) {
         String itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
         int count = stack.getCount();
         if (contains(DynamicFoodConfig.strings(DynamicFoodConfig.BLACKLISTED_ITEMS, List.of()), itemId)) {
@@ -27,8 +31,7 @@ public final class ItemStackFoodResolver {
         }
 
         boolean foodTag = hasConfiguredFoodTag(stack);
-        var resourceDifficulty = DynamicFood.ENGINE.resourceDifficulty(itemId);
-        double automaticDifficulty = resourceDifficulty.score() == null ? 0.0D : resourceDifficulty.score();
+        double automaticDifficulty = automaticDifficulty(itemId, context);
         Optional<ItemFoodProfile> configured = profile(itemId);
         if (configured.isPresent()) {
             ItemFoodProfile profile = configured.get();
@@ -36,7 +39,7 @@ public final class ItemStackFoodResolver {
                 return new IngredientContribution(itemId, 0.0D, 0.0D, count, false, "disabled_profile");
             }
             double difficulty = DynamicFoodConfig.itemDifficulty(itemId, profile.difficulty());
-            var calibrated = DynamicFood.ENGINE.calibratedBaseFoodValue(itemId);
+            var calibrated = calibratedBaseFoodValue(itemId, context);
             double automaticNutrition = calibrated.map(value -> value.nutrition()).orElseGet(() ->
                 DynamicFoodConfig.number(DynamicFoodConfig.CALIBRATION_FALLBACK_NUTRITION, 2.0D));
             double automaticSaturation = calibrated.map(value -> value.effectiveSaturation()).orElseGet(() ->
@@ -50,7 +53,7 @@ public final class ItemStackFoodResolver {
         FoodProperties food = stack.get(DataComponents.FOOD);
         if (food == null) {
             if (foodTag) {
-                var calibrated = DynamicFood.ENGINE.calibratedBaseFoodValue(itemId);
+                var calibrated = calibratedBaseFoodValue(itemId, context);
                 if (calibrated.isPresent()) {
                     return contribution(itemId, calibrated.get(), count, true);
                 }
@@ -64,8 +67,16 @@ public final class ItemStackFoodResolver {
             return new IngredientContribution(itemId, 0.0D, 0.0D, count, false, "non_food");
         }
 
+        if (usesConfiguredDisabledFallback(context)) {
+            return new IngredientContribution(itemId,
+                DynamicFoodConfig.number(DynamicFoodConfig.CALIBRATION_FALLBACK_NUTRITION, 2.0D),
+                DynamicFoodConfig.number(DynamicFoodConfig.CALIBRATION_FALLBACK_SATURATION, 0.0D),
+                count, true, "configured_disabled_fallback",
+                DynamicFoodConfig.itemDifficulty(itemId, automaticDifficulty));
+        }
+
         if (food.nutrition() == 0 && DynamicFoodConfig.flag(DynamicFoodConfig.ZERO_HUNGER_FOOD_ENABLED, true)) {
-            var calibrated = DynamicFood.ENGINE.calibratedBaseFoodValue(itemId);
+            var calibrated = calibratedBaseFoodValue(itemId, context);
             if (calibrated.isPresent()) {
                 return contribution(itemId, calibrated.get(), count, true);
             }
@@ -76,13 +87,63 @@ public final class ItemStackFoodResolver {
                 SaturationConverter.foodPropertiesToEffective(food.nutrition(), food.saturation()), count, true,
                 "zero_hunger_fallback", difficulty);
         }
-        var calibrated = DynamicFood.ENGINE.calibratedBaseFoodValue(itemId);
+        var calibrated = calibratedBaseFoodValue(itemId, context);
         if (calibrated.isPresent()) {
             return contribution(itemId, calibrated.get(), count, true);
         }
         return new IngredientContribution(itemId, food.nutrition(),
             SaturationConverter.foodPropertiesToEffective(food.nutrition(), food.saturation()), count,
             true, "minecraft:food_properties", DynamicFoodConfig.itemDifficulty(itemId, automaticDifficulty));
+    }
+
+    private static double automaticDifficulty(String itemId, RuntimeEconomicContext context) {
+        if (context == null || context.publishedGeneration().isEmpty()) {
+            var resolution = DynamicFood.ENGINE.resourceDifficulty(itemId);
+            return resolution.score() == null ? 0.0D : resolution.score();
+        }
+        return context.publishedGeneration().orElseThrow().economicSnapshot().resource(itemId)
+            .map(resource -> resource.economicResolution().difficulty())
+            .map(score -> score == null ? 0.0D : score)
+            .orElse(0.0D);
+    }
+
+    private static Optional<CalibratedBaseFoodValue> calibratedBaseFoodValue(String itemId,
+        RuntimeEconomicContext context) {
+        if (context == null || context.publishedGeneration().isEmpty()) {
+            return DynamicFood.ENGINE.calibratedBaseFoodValue(itemId);
+        }
+        var generation = context.publishedGeneration().orElseThrow();
+        if (generation.calibrationSnapshot().status()
+            == com.jorjik.dynamicfood.core.CalibrationStatus.DISABLED) {
+            return Optional.empty();
+        }
+        var resource = generation.economicSnapshot().resource(itemId);
+        var calibrated = generation.calibrationSnapshot().calibratedValues().get(itemId);
+        if (resource.isEmpty() || calibrated == null || !resource.get().economicCost().isKnown()) {
+            return Optional.empty();
+        }
+        double economicCost = resource.get().economicCost().value();
+        if (Double.compare(economicCost, calibrated.economicCost()) != 0) {
+            throw new IllegalStateException("published calibration cost does not match its economic snapshot for "
+                + itemId);
+        }
+        double difficulty = DynamicFoodConfig.itemDifficulty(itemId,
+            resource.get().economicResolution().difficulty() == null
+                ? 0.0D : resource.get().economicResolution().difficulty());
+        var calibration = generation.calibrationSnapshot();
+        return Optional.of(new CalibratedBaseFoodValue(
+            calibration.hungerCurve().evaluate(calibrated.foodIndex()),
+            calibration.saturationCurve().evaluate(calibrated.foodIndex()), calibrated.foodIndex(),
+            economicCost, difficulty,
+            calibration.status(), "economic_snapshot:" + generation.generation()));
+    }
+
+    private static boolean usesConfiguredDisabledFallback(RuntimeEconomicContext context) {
+        return context != null && context.publishedGeneration()
+            .map(generation -> generation.calibrationSnapshot().status()
+                == com.jorjik.dynamicfood.core.CalibrationStatus.DISABLED)
+            .orElse(false)
+            && DynamicFoodConfig.calibrationSettings().disabledMode().equals("configured_fallback");
     }
 
     private static IngredientContribution contribution(String itemId, CalibratedBaseFoodValue value,

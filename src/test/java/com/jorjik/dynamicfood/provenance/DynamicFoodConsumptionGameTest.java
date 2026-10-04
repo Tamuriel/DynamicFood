@@ -9,9 +9,21 @@ import com.jorjik.dynamicfood.core.IngredientContribution;
 import com.jorjik.dynamicfood.core.ResourceEconomicProfile;
 import com.jorjik.dynamicfood.core.SurvivalAcquirability;
 import com.jorjik.dynamicfood.core.AcquisitionPath;
+import com.jorjik.dynamicfood.core.EstimateKind;
 import com.jorjik.dynamicfood.core.VillagerTradeAcquisitionAnalyzer;
+import com.jorjik.dynamicfood.core.CalibrationSnapshotBuilder;
+import com.jorjik.dynamicfood.core.EconomicCost;
+import com.jorjik.dynamicfood.core.EconomicCostResolution;
+import com.jorjik.dynamicfood.core.EconomicGenerationPublisher;
+import com.jorjik.dynamicfood.core.EconomicSnapshot;
+import com.jorjik.dynamicfood.core.EconomicSnapshotAudit;
+import com.jorjik.dynamicfood.core.EconomicSnapshotBuilder;
+import com.jorjik.dynamicfood.core.PublishedEconomicGeneration;
+import com.jorjik.dynamicfood.core.ResolutionStatus;
+import com.jorjik.dynamicfood.config.DynamicFoodConfig;
 import net.neoforged.fml.ModList;
 import com.jorjik.dynamicfood.data.DynamicFoodDataComponents;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.List;
 import java.util.Optional;
@@ -109,6 +121,244 @@ public final class DynamicFoodConsumptionGameTest {
             "the same Item ID with different provenance must apply its own distinct food snapshot");
         helper.assertTrue(!lowValue.sourceRecipe().equals(highValue.sourceRecipe()),
             "the test stacks must represent distinct recipe provenance");
+        helper.succeed();
+    }
+
+    @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
+    public static void normalServerStartupPublishesGenerationUsedByRuntimeOperation(GameTestHelper helper) {
+        PublishedEconomicGeneration generation = DynamicFood.ECONOMIC_GENERATIONS.current().orElse(null);
+        helper.assertTrue(generation != null,
+            "normal server initialization must publish a complete economic generation before GameTests run");
+        helper.assertTrue(generation.generation() == 1L,
+            "the first successful normal-startup publication must receive generation 1");
+        generation.economicSnapshot().validateForCalibration();
+        generation.calibrationSnapshot().validateForPublication(generation.economicSnapshot());
+        String signature = generation.economicSnapshot().signature();
+
+        ItemStack bread = new ItemStack(Items.BREAD);
+        ItemStack output = new ItemStack(Items.BREAD);
+        RecipeOperation operation = new RecipeOperation("gametest:production_generation",
+            "minecraft:crafting", "test:crafting", 0,
+            List.of(new RecipeOperation.ItemInput(bread, 1)), List.of(),
+            List.of(new RecipeOperation.Output(output, null)), Map.of());
+        new RecipeTransactionHandler().onTransaction(new RecipeTransactionEvent(operation));
+
+        DynamicFoodValue value = output.get(DynamicFoodDataComponents.VALUE.get());
+        helper.assertTrue(value != null
+            && value.operationSnapshot().orElseThrow().economicGeneration().orElseThrow()
+                == generation.generation()
+            && value.operationSnapshot().orElseThrow().economicContentSignature().orElseThrow()
+                .equals(signature)
+            && value.operationSnapshot().orElseThrow().calculationPath().equals("economic_snapshot"),
+            "the first normal runtime operation must use and persist the production-published generation");
+        helper.assertTrue(value.components().size() == 1
+            && value.components().getFirst().sourceRecipe().equals("minecraft:food_properties")
+            && value.components().getFirst().nutrition() == bread.get(DataComponents.FOOD).nutrition(),
+            "with no proven calibration entry for bread, generation-aware resolution must preserve vanilla food data");
+        helper.assertTrue(DynamicFood.ECONOMIC_GENERATIONS.current().orElseThrow() == generation
+            && generation.economicSnapshot().signature().equals(signature),
+            "runtime calculation must not rebuild or replace the published generation");
+
+        EconomicGenerationPublisher emptyPublisher = new EconomicGenerationPublisher();
+        ItemStack legacyOutput = new ItemStack(Items.BREAD);
+        RecipeOperation legacyOperation = new RecipeOperation("gametest:no_lazy_publication",
+            "minecraft:crafting", "test:crafting", 0,
+            List.of(new RecipeOperation.ItemInput(new ItemStack(Items.BREAD), 1)), List.of(),
+            List.of(new RecipeOperation.Output(legacyOutput, null)), Map.of());
+        RuntimeFoodApplier.applyOperation(legacyOperation, emptyPublisher);
+        helper.assertTrue(emptyPublisher.current().isEmpty(),
+            "a runtime operation with no published generation must not lazily build or publish one");
+        helper.succeed();
+    }
+
+    @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
+    public static void economicPolicyConfigRequiresRebuildToPublishNewGeneration(GameTestHelper helper) {
+        List<? extends String> originalWeights = List.copyOf(DynamicFoodConfig.COST_FACTOR_WEIGHTS.get());
+        EconomicGenerationPublisher publisher = new EconomicGenerationPublisher();
+        try {
+            PublishedEconomicGeneration generationA = buildPolicyTestGeneration(publisher);
+            String policySignatureA = DynamicFoodConfig.economicPolicySignature();
+            String snapshotSignatureA = generationA.economicSnapshot().signature();
+
+            List<String> changedWeights = new ArrayList<>(originalWeights);
+            changedWeights.removeIf(entry -> entry.startsWith("quantity_cost|"));
+            changedWeights.add("quantity_cost|2");
+            DynamicFoodConfig.COST_FACTOR_WEIGHTS.set(changedWeights);
+
+            String policySignatureB = DynamicFoodConfig.economicPolicySignature();
+            helper.assertTrue(!policySignatureA.equals(policySignatureB),
+                "changing the loaded factor weight must change the active policy signature");
+            helper.assertTrue(publisher.current().orElseThrow() == generationA,
+                "a config value change alone must not replace the immutable published generation");
+
+            PublishedEconomicGeneration generationB = buildPolicyTestGeneration(publisher);
+            helper.assertTrue(generationB.generation() == 2L,
+                "the rebuild under policy B must publish the next generation");
+            helper.assertTrue(!snapshotSignatureA.equals(generationB.economicSnapshot().signature()),
+                "policy B must be included in the rebuilt snapshot content signature");
+            helper.assertTrue(generationB.calibrationSnapshot().economicContentSignature()
+                    .equals(generationB.economicSnapshot().signature()),
+                "the calibration snapshot must link to the policy B economic snapshot");
+            helper.assertTrue(publisher.current().orElseThrow() == generationB,
+                "the new policy result must be the current published generation");
+            helper.assertTrue(generationA.economicSnapshot().signature().equals(snapshotSignatureA),
+                "the old generation must remain immutable after policy B is published");
+        } finally {
+            DynamicFoodConfig.COST_FACTOR_WEIGHTS.set(originalWeights);
+        }
+        helper.succeed();
+    }
+
+    private static PublishedEconomicGeneration buildPolicyTestGeneration(EconomicGenerationPublisher publisher) {
+        return publisher.rebuildAndPublish(generation -> {
+            EconomicSnapshot economicSnapshot = EconomicSnapshotBuilder.build(generation,
+                List.of("gametest:policy_signature"), List.of(),
+                (resourceId, paths) -> new EconomicCostResolution(
+                    EconomicCost.unknown("policy signature generation fixture"),
+                    null, ResolutionStatus.UNKNOWN, DynamicFoodConfig.acquisitionEconomicHorizon(),
+                    null, paths, 0.0D, List.of("policy signature test fixture")));
+            var calibrationSnapshot = CalibrationSnapshotBuilder.build(economicSnapshot, List.of(),
+                DynamicFoodConfig.calibrationSettings());
+            return new PublishedEconomicGeneration(economicSnapshot, calibrationSnapshot);
+        });
+    }
+
+    @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
+    public static void productionSnapshotAuditAndConfiguredRecipeEconomics(GameTestHelper helper) {
+        PublishedEconomicGeneration generation = DynamicFood.ECONOMIC_GENERATIONS.current().orElse(null);
+        helper.assertTrue(generation != null,
+            "the economic audit must inspect the normal-startup published generation");
+        EconomicSnapshot snapshot = generation.economicSnapshot();
+        EconomicSnapshotAudit audit = EconomicSnapshotAudit.inspect(generation);
+        helper.assertTrue(snapshot.inputSet().resourceIds().equals(snapshot.resources().keySet())
+                && snapshot.inputSet().candidateResourceIds().size() > 0
+                && snapshot.resources().size() < BuiltInRegistries.ITEM.keySet().size()
+                && !snapshot.resources().containsKey("minecraft:air"),
+            "production snapshot scope must contain indexed acquisition candidates and required dependencies, not every registry item");
+        helper.assertTrue(snapshot.inputSet().recursiveDependencyIds().stream()
+                .allMatch(snapshot.resources()::containsKey),
+            "every consumed transitive recipe dependency must have a snapshot result");
+        helper.assertTrue(audit.resourceScope().directCandidates()
+                == snapshot.inputSet().candidateResourceIds().size()
+                && audit.resourceScope().recursiveDependencies()
+                    == snapshot.inputSet().dependencyOnlyCount(),
+            "production diagnostics must report candidate and dependency roles independently of calibration population");
+        helper.assertTrue(audit.totalResources() == audit.resolvedResources() + audit.unknownResources()
+                + audit.notApplicableResources(),
+            "economic snapshot audit counts must account for every included candidate or dependency");
+        helper.assertTrue(audit.unknownByRootCause().values().stream().mapToInt(Integer::intValue).sum()
+                == audit.unknownResources(),
+            "bounded root-cause categories must account for every unresolved resource");
+        helper.assertTrue(audit.notApplicableResources() == 0,
+            "NOT_APPLICABLE is not an EconomicCost resolution status");
+        helper.assertTrue(audit.calibrationCandidates() == generation.calibrationSnapshot().populationSize()
+                && audit.calibratedResources() == generation.calibrationSnapshot().calibratedValues().size()
+                && Double.compare(audit.calibrationCoverage(),
+                    generation.calibrationSnapshot().calibrationCoverage()) == 0,
+            "audit calibration population and coverage must come from the linked calibration snapshot");
+
+        EconomicSnapshot.ResourceResult acaciaBoat = snapshot.resource("minecraft:acacia_boat").orElseThrow();
+        AcquisitionPath acaciaBoatRecipe = acaciaBoat.acquisitionPaths().stream()
+            .filter(path -> path.sourceType().equals("recipe"))
+            .findFirst().orElseThrow();
+        helper.assertTrue(acaciaBoatRecipe.evidence().measurements()
+                .get("expected_units_per_attempt").estimateKind().orElseThrow() == EstimateKind.EXACT
+                && acaciaBoatRecipe.evidence().attributes().entrySet().stream()
+                    .filter(entry -> entry.getKey().startsWith("input_")
+                        && entry.getKey().endsWith("_alternatives"))
+                    .noneMatch(entry -> entry.getValue().isBlank())
+                && !acaciaBoat.economicCost().isKnown()
+                && acaciaBoatRecipe.evidence().attributes().getOrDefault("missing_inputs", "")
+                    .contains("unknown input [minecraft:acacia_planks]"),
+            "natural recipe evidence must omit empty shaped slots, retain exact output quantity, and leave"
+                + " the derived EconomicCost UNKNOWN while its planks input has no resolved cost");
+
+        var wheatOverride = DynamicFoodConfig.economicProfiles().stream()
+            .filter(profile -> profile.resourceId().equals("minecraft:wheat"))
+            .filter(profile -> Double.valueOf(0.25D).equals(profile.economicCost()))
+            .findFirst();
+        if (wheatOverride.isPresent()) {
+            helper.assertTrue(audit.resolvedBySource().get("explicit_override") == 1,
+                "production audit must distinguish the direct override from unresolved recipe candidates");
+            EconomicSnapshot.ResourceResult wheat = snapshot.resource("minecraft:wheat").orElseThrow();
+            EconomicSnapshot.ResourceResult bread = snapshot.resource("minecraft:bread").orElseThrow();
+            AcquisitionPath breadRecipe = bread.acquisitionPaths().stream()
+                .filter(path -> path.sourceType().equals("recipe"))
+                .filter(path -> path.evidence().attributes().values().stream()
+                    .filter("minecraft:wheat"::equals).count() == 3L)
+                .filter(path -> path.economicCost().isKnown())
+                .findFirst().orElse(null);
+            helper.assertTrue(wheat.economicCost().isKnown()
+                    && wheat.economicCost().value() == 0.25D
+                    && wheat.economicCost().primitiveId().equals("configured_profile"),
+                "the configured wheat cost must remain the authoritative snapshot cost");
+            helper.assertTrue(breadRecipe != null && breadRecipe.economicCost().value() == 0.75D
+                    && !bread.economicCost().isKnown()
+                    && bread.economicResolution().status() == ResolutionStatus.UNKNOWN
+                    && breadRecipe.evidence().measurement("expected_units_per_attempt")
+                        .estimateKind().orElseThrow() == EstimateKind.EXACT
+                    && breadRecipe.feasibilityFactors().get("probability").isNotApplicable()
+                    && breadRecipe.feasibilityFactors().get("expected_yield").isNotApplicable(),
+                "the bread candidate records the 0.75 recursive amount but remains unresolved without proven survival and complete core factors");
+            helper.assertTrue(generation.calibrationSnapshot().calibratedValues().containsKey("minecraft:wheat"),
+                "the explicit survival profile must enter calibration from the EconomicSnapshot");
+
+            ItemStack wheatInput = new ItemStack(Items.WHEAT);
+            var generationContext = RuntimeEconomicContext.capture(DynamicFood.ECONOMIC_GENERATIONS);
+            var calibratedWheatValue = generation.calibrationSnapshot().calibratedValues()
+                .get("minecraft:wheat");
+            var wheatContribution = ItemStackFoodResolver.resolve(wheatInput, generationContext);
+            double expectedWheatNutrition = generation.calibrationSnapshot().hungerCurve()
+                .evaluate(calibratedWheatValue.foodIndex());
+            helper.assertTrue(Double.compare(wheatContribution.nutrition(), expectedWheatNutrition) == 0,
+                "runtime item resolution must map the published wheat FoodIndex through its linked calibration curve");
+            ItemStack breadOutput = new ItemStack(Items.BREAD);
+            RecipeOperation operation = new RecipeOperation("gametest:resolved_economic_input",
+                "minecraft:crafting", "test:crafting", 0,
+                List.of(new RecipeOperation.ItemInput(wheatInput, 1)), List.of(),
+                List.of(new RecipeOperation.Output(breadOutput, null)), Map.of());
+            new RecipeTransactionHandler().onTransaction(new RecipeTransactionEvent(operation));
+            DynamicFoodValue runtimeValue = breadOutput.get(DynamicFoodDataComponents.VALUE.get());
+            helper.assertTrue(runtimeValue != null
+                    && runtimeValue.operationSnapshot().orElseThrow().economicGeneration().orElseThrow()
+                        == generation.generation()
+                    && runtimeValue.components().stream()
+                        .anyMatch(component -> component.itemId().equals("minecraft:wheat")
+                            && Double.compare(component.nutrition(), expectedWheatNutrition) == 0),
+                "runtime must apply the production generation's calibrated wheat value to a real operation");
+        } else {
+            DynamicFood.LOGGER.warn("Production economic GameTest has no wheat override fixture: {}",
+                audit.countsSummary() + "; " + audit.diagnosticsSummary());
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
+    public static void disabledPublishedCalibrationUsesVanillaFoodProperties(GameTestHelper helper) {
+        EconomicSnapshot economic = EconomicSnapshotBuilder.build(31, List.of("minecraft:bread"),
+            List.of(), (itemId, paths) -> new EconomicCostResolution(
+                EconomicCost.unknown("disabled-calibration GameTest has no economic evidence"),
+                null, ResolutionStatus.UNKNOWN, 100, null, paths, 0.0D, List.of("unresolved")));
+        FoodCalibrationSettings disabled = new FoodCalibrationSettings(false, "vanilla", 1,
+            0.70D, 0.30D, 0.05D, 0.95D, 0.50D, 0.80D, "medium",
+            List.of(), List.of(), 2.0D, 0.0D);
+        var calibration = CalibrationSnapshotBuilder.build(economic, List.of(), disabled);
+        EconomicGenerationPublisher publisher = new EconomicGenerationPublisher();
+        publisher.publish(new PublishedEconomicGeneration(economic, calibration));
+        ItemStack bread = new ItemStack(Items.BREAD);
+        FoodProperties vanilla = bread.get(DataComponents.FOOD);
+
+        IngredientContribution contribution = RuntimeFoodApplier.contribution(bread, 1,
+            RuntimeEconomicContext.capture(publisher));
+
+        helper.assertTrue(calibration.status() == com.jorjik.dynamicfood.core.CalibrationStatus.DISABLED
+            && calibration.calibratedValues().isEmpty(),
+            "disabled calibration must publish no synthetic FoodIndex values");
+        helper.assertTrue(contribution.sourceRecipe().equals("minecraft:food_properties")
+            && contribution.nutrition() == vanilla.nutrition()
+            && Math.abs(contribution.saturation() - SaturationConverter.foodPropertiesToEffective(
+                vanilla.nutrition(), vanilla.saturation())) < 0.0001D,
+            "a published disabled calibration must use the existing vanilla food-value behavior");
         helper.succeed();
     }
 
@@ -270,6 +520,74 @@ public final class DynamicFoodConsumptionGameTest {
     }
 
     @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
+    public static void runtimeOperationKeepsCapturedGenerationAcrossRepublish(GameTestHelper helper) {
+        EconomicGenerationPublisher publisher = new EconomicGenerationPublisher();
+        PublishedEconomicGeneration generation10 = testGeneration(10);
+        PublishedEconomicGeneration generation11 = testGeneration(11);
+        publisher.publish(generation10);
+
+        ItemStack firstOutput = new ItemStack(Items.BREAD);
+        ItemStack firstFoodSibling = new ItemStack(Items.COOKED_BEEF);
+        RecipeOperation firstOperation = new RecipeOperation("gametest:generation_10",
+            "minecraft:crafting", "test:crafting", 0,
+            List.of(new RecipeOperation.ItemInput(new ItemStack(Items.BREAD, 3), 2)), List.of(),
+            List.of(new RecipeOperation.Output(firstOutput, null),
+                new RecipeOperation.Output(firstFoodSibling, null)), Map.of());
+        new RecipeTransactionHandler(publisher).onTransaction(new RecipeTransactionEvent(firstOperation));
+        DynamicFoodValue firstValue = firstOutput.get(DynamicFoodDataComponents.VALUE.get());
+
+        publisher.publish(generation11);
+        ItemStack secondOutput = new ItemStack(Items.BREAD);
+        ItemStack secondFoodSibling = new ItemStack(Items.COOKED_BEEF);
+        RecipeOperation secondOperation = new RecipeOperation("gametest:generation_11",
+            "minecraft:crafting", "test:crafting", 0,
+            List.of(new RecipeOperation.ItemInput(new ItemStack(Items.BREAD, 3), 2)), List.of(),
+            List.of(new RecipeOperation.Output(secondOutput, null),
+                new RecipeOperation.Output(secondFoodSibling, null)), Map.of());
+        new RecipeTransactionHandler(publisher).onTransaction(new RecipeTransactionEvent(secondOperation));
+        DynamicFoodValue secondValue = secondOutput.get(DynamicFoodDataComponents.VALUE.get());
+
+        helper.assertTrue(firstValue != null && firstValue.operationSnapshot().orElseThrow()
+                .economicGeneration().orElseThrow() == 10L
+            && firstValue.operationSnapshot().orElseThrow().calculationPath().equals("economic_snapshot")
+            && firstValue.operationSnapshot().orElseThrow().economicContentSignature().orElseThrow()
+                .equals(generation10.economicSnapshot().signature()),
+            "the first runtime operation must retain its captured generation 10 metadata");
+        helper.assertTrue(secondValue != null && secondValue.operationSnapshot().orElseThrow()
+                .economicGeneration().orElseThrow() == 11L
+            && secondValue.operationSnapshot().orElseThrow().economicContentSignature().orElseThrow()
+                .equals(generation11.economicSnapshot().signature()),
+            "the next runtime operation must capture generation 11");
+        helper.assertTrue(firstValue.operationSnapshot().orElseThrow().economicGeneration()
+                .equals(Optional.of(generation10.calibrationSnapshot().economicGeneration()))
+            && generation10.calibrationSnapshot().economicGeneration() == 10L
+            && generation10.economicSnapshot().signature()
+                .equals(generation10.calibrationSnapshot().economicContentSignature()),
+            "republishing must not alter the first operation or its paired calibration generation");
+        helper.assertTrue(firstValue.nutrition() != secondValue.nutrition()
+            && firstValue.saturation() != secondValue.saturation(),
+            "different published economic generations must change the calculated runtime food value");
+        helper.assertTrue(firstValue.components().size() == 1
+            && firstValue.components().getFirst().count() == 2
+            && firstValue.components().getFirst().sourceRecipe().equals("economic_snapshot:10"),
+            "the operation must use its captured snapshot for two actually consumed input items");
+        helper.assertTrue(firstFoodSibling.get(DynamicFoodDataComponents.VALUE.get()).operationSnapshot()
+                .orElseThrow().economicGeneration().orElseThrow() == 10L
+            && secondFoodSibling.get(DynamicFoodDataComponents.VALUE.get()).operationSnapshot()
+                .orElseThrow().economicGeneration().orElseThrow() == 11L,
+            "every food output of an operation must share its single captured economic generation");
+
+        ItemStack vanillaOutput = new ItemStack(Items.BREAD);
+        RuntimeFoodApplier.apply(vanillaOutput,
+            new RuntimeProvenance("minecraft:bread", "gametest:vanilla_generation",
+                "minecraft:crafting", 1, List.of()), publisher);
+        helper.assertTrue(vanillaOutput.get(DynamicFoodDataComponents.VALUE.get())
+                .operationSnapshot().orElseThrow().economicGeneration().orElseThrow() == 11L,
+            "the vanilla single-output applier must capture the current generation once");
+        helper.succeed();
+    }
+
+    @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
     public static void legacyTransactionAllocatesOneOperationAcrossFoodOutputs(GameTestHelper helper) {
         ItemStack input = new ItemStack(Items.WHEAT);
         DynamicFoodValue inputValue = new DynamicFoodValue(5.0D, 5, 2.0D, 2.0F,
@@ -309,9 +627,13 @@ public final class DynamicFoodConsumptionGameTest {
     @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
     public static void dynamicFoodComponentSurvivesCopySplitAndWorldSerialization(GameTestHelper helper) {
         ItemStack original = new ItemStack(Items.BREAD, 2);
+        OperationFoodSnapshot operationSnapshot = new OperationFoodSnapshot("minecraft:crafting",
+            "test:crafting", 0, "minecraft:wheat x1", "", "", 1.0D,
+            3.5D, 1.25D, 0.0D, 0.0D, Optional.of(7L), Optional.of("generation-seven-signature"));
         DynamicFoodValue value = new DynamicFoodValue(3.5D, 4, 1.25D, 1.25F,
             2.0D, "gametest:provenance", 2,
-            List.of(new IngredientFoodSnapshot("minecraft:wheat", 3.5D, 1.25D, 1, true, "gametest:raw", 1.0D)));
+            List.of(new IngredientFoodSnapshot("minecraft:wheat", 3.5D, 1.25D, 1, true, "gametest:raw", 1.0D)),
+            Optional.of(operationSnapshot), DynamicFoodValue.CURRENT_FORMAT_VERSION);
         original.set(DynamicFoodDataComponents.VALUE.get(), value);
 
         ItemStack copy = original.copy();
@@ -328,6 +650,15 @@ public final class DynamicFoodConsumptionGameTest {
             "split must preserve DynamicFoodValue");
         helper.assertTrue(loaded.get(DynamicFoodDataComponents.VALUE.get()).equals(value),
             "ItemStack save/load must preserve DynamicFoodValue");
+        helper.assertTrue(loaded.get(DynamicFoodDataComponents.VALUE.get()).operationSnapshot().orElseThrow()
+                .economicGeneration().orElseThrow() == 7L
+            && loaded.get(DynamicFoodDataComponents.VALUE.get()).operationSnapshot().orElseThrow()
+                .economicContentSignature().orElseThrow().equals("generation-seven-signature"),
+            "save/load must preserve captured generation metadata");
+        DynamicFoodValue legacyValue = new DynamicFoodValue(3.5D, 4, 1.25D, 1.25F,
+            2.0D, "gametest:legacy_without_generation", 2, List.of());
+        helper.assertTrue(legacyValue.operationSnapshot().isEmpty(),
+            "legacy stack values without operation generation metadata remain generation-absent");
         helper.assertTrue(!ItemStack.isSameItemSameComponents(copy, different),
             "different per-stack food values must prevent component-equal stack merging");
         ItemStack sameValue = new ItemStack(Items.BREAD, 1);
@@ -451,6 +782,11 @@ public final class DynamicFoodConsumptionGameTest {
             "fixed NeoForge BasicItemListing output must have a deterministic source path");
         helper.assertTrue(breadPaths.getFirst().costsByHorizon().get(100)
             .factors().get("quantity_cost").isKnown()
+            && breadPaths.getFirst().evidence().measurement("output_quantity_per_completed_offer")
+                .estimateKind().orElseThrow() == EstimateKind.EXACT
+            && breadPaths.getFirst().evidence().measurement("expected_units_per_attempt")
+                .estimateKind().orElseThrow() == EstimateKind.EXACT
+            && !breadPaths.getFirst().economicCost().isKnown()
             && breadPaths.getFirst().feasibilityFactors().get("probability").isNotApplicable()
             && breadPaths.getFirst().feasibilityFactors().get("expected_yield").isNotApplicable()
             && !breadPaths.getFirst().costsByHorizon().get(100).factors().get("material_cost").isKnown()
@@ -733,5 +1069,26 @@ public final class DynamicFoodConsumptionGameTest {
         helper.assertTrue(OptionalTransactionSupport.createDeployerContext().isEmpty(),
             "the completed Create Deployer operation must clear its thread-local context");
         helper.succeed();
+    }
+
+    private static PublishedEconomicGeneration testGeneration(long generation) {
+        EconomicSnapshot economicSnapshot = EconomicSnapshotBuilder.build(generation,
+            List.of("minecraft:bread", "minecraft:cooked_beef"), List.of(), (resourceId, paths) ->
+                new EconomicCostResolution(EconomicCost.known(
+                    generation % 2 == 0
+                        ? resourceId.equals("minecraft:bread") ? 0.1D : 0.9D
+                        : resourceId.equals("minecraft:bread") ? 0.9D : 0.1D,
+                    "test:primitive", 100, "runtime capture GameTest fixture"),
+                null, ResolutionStatus.COMPLETE, 100, null, paths, 1.0D, List.of("fixture")));
+        List<ResourceEconomicProfile> candidates = List.of(
+            new ResourceEconomicProfile("minecraft:bread", "minecraft:bread", null, 1.0D, 1.0D,
+                true, true, SurvivalAcquirability.TRUE, false, false),
+            new ResourceEconomicProfile("minecraft:cooked_beef", "minecraft:cooked_beef", null, 1.0D, 1.0D,
+                true, true, SurvivalAcquirability.TRUE, false, false));
+        FoodCalibrationSettings settings = new FoodCalibrationSettings(true, "vanilla", 1,
+            0.70D, 0.30D, 0.05D, 0.95D, 0.50D, 0.80D, "medium",
+            List.of(), List.of(), 2.0D, 0.0D, "all_survival_economic_resources", List.of());
+        var calibration = CalibrationSnapshotBuilder.build(economicSnapshot, candidates, settings);
+        return new PublishedEconomicGeneration(economicSnapshot, calibration);
     }
 }

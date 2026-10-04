@@ -63,10 +63,14 @@ public final class RecipeResolver {
 
     public FoodValue resolve(RuntimeProvenance provenance) {
         if (provenance.hasActualInputs()) {
-            return calculateOperation(provenance.recipeId(), provenance.recipeType(),
-                provenance.actualInputs(), provenance.outputCount(), provenance.stationDifficulty());
+            return resolveActualOperation(provenance);
         }
         return resolveStatic(provenance.resultItemId(), provenance.recipeId(), provenance.recipeId(), new HashSet<>());
+    }
+
+    public FoodValue resolveActualOperation(RuntimeProvenance provenance) {
+        return calculateOperation(provenance.recipeId(), provenance.recipeType(),
+            provenance.actualInputs(), provenance.outputCount(), provenance.stationDifficulty());
     }
 
     public FoodValue resolveStatic(String itemId) {

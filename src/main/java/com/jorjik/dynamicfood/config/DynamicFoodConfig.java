@@ -14,6 +14,16 @@ import java.util.Map;
 
 public final class DynamicFoodConfig {
     private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
+    private static final List<String> DEFAULT_FEASIBILITY_FACTOR_WEIGHTS = List.of(
+        "probability|1", "expected_yield|1", "repeatability|1", "renewability|1",
+        "startup_cost|1", "recurring_cost|1", "prerequisite_cost|1",
+        "processing_requirements|1", "progression_requirement|1", "danger|1",
+        "resource_consumption|1", "intermediate_steps|1", "equipment_availability|1",
+        "reliability|1");
+    private static final List<String> DEFAULT_COST_FACTOR_WEIGHTS = List.of(
+        "quantity_cost|1", "time_cost|1", "material_cost|1", "equipment_cost|1",
+        "progression_cost|1", "prerequisite_cost|1", "intermediate_cost|1",
+        "danger_cost|1", "transport_cost|1", "resource_consumption_cost|1");
 
     public static final ModConfigSpec.BooleanValue FOOD_CALIBRATION_ENABLED = BUILDER
         .comment("Enable self-calibrated FoodIndex for resources with known economic profiles.")
@@ -77,7 +87,7 @@ public final class DynamicFoodConfig {
         .defineInRange("food_calibration.configured_fallback_saturation", 0.0D, 0.0D, 1000.0D);
 
     public static final ModConfigSpec.ConfigValue<List<? extends String>> ECONOMIC_RESOURCE_OVERRIDES = BUILDER
-        .comment("Explicit economic profiles: item_id|economic_cost>=0|weight>0|group-or--|TRUE/FALSE/UNKNOWN survival availability.")
+        .comment("Explicit economic profiles: item_id|economic_cost[0,1]|weight>0|group-or--|TRUE/FALSE/UNKNOWN survival availability.")
         .defineListAllowEmpty("food_calibration.economic_resources", List.of(), value -> value instanceof String);
 
     public static final ModConfigSpec.DoubleValue MATERIAL_COST_REFERENCE = BUILDER
@@ -123,20 +133,13 @@ public final class DynamicFoodConfig {
 
     public static final ModConfigSpec.ConfigValue<List<? extends String>> FEASIBILITY_FACTOR_WEIGHTS = BUILDER
         .comment("Factor weights use factor|weight. Unknown factors reduce coverage.")
-        .defineList("acquisition.feasibility.factor_weights", List.of(
-            "probability|1", "expected_yield|1", "repeatability|1", "renewability|1",
-            "startup_cost|1", "recurring_cost|1", "prerequisite_cost|1",
-            "processing_requirements|1", "progression_requirement|1", "danger|1",
-            "resource_consumption|1", "intermediate_steps|1", "equipment_availability|1",
-            "reliability|1"), value -> value instanceof String);
+        .defineList("acquisition.feasibility.factor_weights", DEFAULT_FEASIBILITY_FACTOR_WEIGHTS,
+            value -> value instanceof String);
 
     public static final ModConfigSpec.ConfigValue<List<? extends String>> COST_FACTOR_WEIGHTS = BUILDER
-        .comment("Canonical cost factor weights use factor|weight.")
-        .defineList("acquisition.cost.factor_weights", List.of(
-            "quantity_cost|1", "time_cost|1", "startup_cost|1", "recurring_cost|1",
-            "prerequisite_cost|1", "progression_cost|1", "equipment_cost|1",
-            "danger_cost|1", "transport_cost|1", "intermediate_cost|1",
-            "resource_consumption_cost|1", "material_cost|1"), value -> value instanceof String);
+        .comment("Economic policy weights use factor|weight; valid factors are quantity_cost, time_cost, material_cost, equipment_cost, progression_cost, prerequisite_cost, intermediate_cost, danger_cost, transport_cost and resource_consumption_cost.")
+        .defineList("acquisition.cost.factor_weights", DEFAULT_COST_FACTOR_WEIGHTS,
+            DynamicFoodConfig::isCostWeightEntry);
 
     public static final ModConfigSpec.ConfigValue<String> OUTPUT_ALLOCATION_MODE = BUILDER
         .define("processing.output_allocation", "quantity",
@@ -368,11 +371,62 @@ public final class DynamicFoodConfig {
     }
 
     public static Map<String, Double> feasibilityFactorWeights() {
-        return parseWeights(strings(FEASIBILITY_FACTOR_WEIGHTS, List.of()), "feasibility");
+        return parseWeights(strings(FEASIBILITY_FACTOR_WEIGHTS, DEFAULT_FEASIBILITY_FACTOR_WEIGHTS), "feasibility");
     }
 
     public static Map<String, Double> costFactorWeights() {
-        return parseWeights(strings(COST_FACTOR_WEIGHTS, List.of()), "cost");
+        Map<String, Double> configured = parseWeights(
+            strings(COST_FACTOR_WEIGHTS, DEFAULT_COST_FACTOR_WEIGHTS), "cost");
+        Map<String, Double> result = new LinkedHashMap<>();
+        for (String factor : com.jorjik.dynamicfood.core.CostVector.CORE_FACTORS) {
+            result.put(factor, configured.getOrDefault(factor, 1.0D));
+        }
+        for (String factor : com.jorjik.dynamicfood.core.CostVector.ADDITIONAL_FACTORS) {
+            result.put(factor, configured.getOrDefault(factor, 1.0D));
+        }
+        return Map.copyOf(result);
+    }
+
+    public static String economicPolicySignature() {
+        StringBuilder signature = new StringBuilder("economic-policy-v1");
+        costFactorWeights().entrySet().stream().sorted(Map.Entry.comparingByKey())
+            .forEach(entry -> signature.append('|').append(entry.getKey()).append('=')
+                .append(Double.toHexString(entry.getValue())));
+        signature.append("|horizon=").append(acquisitionEconomicHorizon())
+            .append("|strategy=").append(acquisitionStrategy())
+            .append("|feasibilityMinimum=").append(Double.toHexString(minimumFeasibility()))
+            .append("|feasibilityCoverage=").append(Double.toHexString(minimumFeasibilityCoverage()))
+            .append("|allowPartialFeasibility=").append(allowPartialFeasibility());
+        feasibilityFactorWeights().entrySet().stream().sorted(Map.Entry.comparingByKey())
+            .forEach(entry -> signature.append("|feasibility:").append(entry.getKey()).append('=')
+                .append(Double.toHexString(entry.getValue())));
+        signature
+            .append("|materialReference=").append(Double.toHexString(materialCostReference()))
+            .append("|materialCap=").append(Double.toHexString(materialCostCap()))
+            .append("|quantityReference=").append(Double.toHexString(lootAttemptsReference()))
+            .append("|quantityCap=").append(Double.toHexString(lootAttemptsCap()))
+            .append("|timeReference=").append(Double.toHexString(timeCostReferenceTicks()))
+            .append("|timeCap=").append(Double.toHexString(timeCostCapTicks()));
+        return signature.toString();
+    }
+
+    private static boolean isCostWeightEntry(Object value) {
+        if (!(value instanceof String entry)) {
+            return false;
+        }
+        String[] parts = entry.split("\\|", -1);
+        return parts.length == 2 && (com.jorjik.dynamicfood.core.CostVector.CORE_FACTORS.contains(parts[0].trim())
+            || com.jorjik.dynamicfood.core.CostVector.ADDITIONAL_FACTORS.contains(parts[0].trim()))
+            && isFiniteNonNegative(parts[1].trim());
+    }
+
+    private static boolean isFiniteNonNegative(String value) {
+        try {
+            double weight = Double.parseDouble(value);
+            return Double.isFinite(weight) && weight >= 0.0D;
+        } catch (NumberFormatException exception) {
+            return false;
+        }
     }
 
     public static String outputAllocationMode() {

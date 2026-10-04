@@ -11,21 +11,34 @@ public record RecipeNode(
     int outputCount,
     List<IngredientContribution> ingredients,
     Double processingTimeTicks,
-    List<AcquisitionIngredient> acquisitionIngredients
+    List<AcquisitionIngredient> acquisitionIngredients,
+    boolean activeInRecipeManager
 ) {
     public RecipeNode(String recipeId, String recipeType, String resultId, int outputCount,
         List<IngredientContribution> ingredients) {
-        this(recipeId, recipeType, resultId, outputCount, ingredients, null);
+        this(recipeId, recipeType, resultId, outputCount, ingredients, null, false);
     }
 
     public RecipeNode(String recipeId, String recipeType, String resultId, int outputCount,
         List<IngredientContribution> ingredients, Double processingTimeTicks) {
+        this(recipeId, recipeType, resultId, outputCount, ingredients, processingTimeTicks, false);
+    }
+
+    public RecipeNode(String recipeId, String recipeType, String resultId, int outputCount,
+        List<IngredientContribution> ingredients, Double processingTimeTicks,
+        List<AcquisitionIngredient> acquisitionIngredients) {
+        this(recipeId, recipeType, resultId, outputCount, ingredients, processingTimeTicks,
+            acquisitionIngredients, false);
+    }
+
+    public RecipeNode(String recipeId, String recipeType, String resultId, int outputCount,
+        List<IngredientContribution> ingredients, Double processingTimeTicks, boolean activeInRecipeManager) {
         this(recipeId, recipeType, resultId, outputCount, ingredients, processingTimeTicks,
             ingredients.stream().filter(IngredientContribution::foodComponent)
                 .map(input -> new AcquisitionIngredient(
                     input.itemId().equals("dynamicfood:ingredient_alternatives")
                         ? List.of() : List.of(input.itemId()), input.count()))
-                .toList());
+                .toList(), activeInRecipeManager);
     }
 
     public RecipeNode {

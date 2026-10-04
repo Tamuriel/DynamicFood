@@ -10,6 +10,7 @@ import com.jorjik.dynamicfood.graph.RecipeResolver;
 import com.jorjik.dynamicfood.graph.RecipeValueCache;
 import com.jorjik.dynamicfood.provenance.DynamicFoodValue;
 import com.jorjik.dynamicfood.provenance.RuntimeProvenance;
+import com.jorjik.dynamicfood.provenance.RuntimeEconomicContext;
 import com.jorjik.dynamicfood.provenance.RecipeOperation;
 import java.util.ArrayList;
 import net.minecraft.core.component.DataComponents;
@@ -46,6 +47,7 @@ public final class DynamicFoodEngine {
     private volatile WorldgenAcquisitionAnalyzer worldgenAcquisitionAnalyzer;
     private volatile VillagerTradeAcquisitionAnalyzer villagerTradeAcquisitionAnalyzer =
         VillagerTradeAcquisitionAnalyzer.empty();
+    private volatile boolean staticAcquisitionInputsReady;
     private final Map<String, EconomicCostResolution> economicResolutionCache = new ConcurrentHashMap<>();
     private final Map<String, List<AcquisitionPath>> acquisitionPathCache = new ConcurrentHashMap<>();
     private volatile List<String> calibrationDiscoveryDiagnostics = List.of("Calibration discovery has not run");
@@ -61,6 +63,16 @@ public final class DynamicFoodEngine {
             }
         }
         return new RecipeResolver(graph, cache, adapters).resolve(effectiveProvenance);
+    }
+
+    public FoodValue resolve(RuntimeProvenance provenance, RuntimeEconomicContext context) {
+        if (context == null) {
+            throw new IllegalArgumentException("runtime economic context is required");
+        }
+        if (context.publishedGeneration().isEmpty()) {
+            return resolve(provenance);
+        }
+        return new RecipeResolver(graph, cache, adapters).resolveActualOperation(provenance);
     }
 
     public FoodValue resolveOrSnapshot(RuntimeProvenance provenance, DynamicFoodValue existingValue) {
@@ -184,6 +196,7 @@ public final class DynamicFoodEngine {
                 candidates.addAll(worldgenAnalyzer.indexedItemIds());
             }
             candidates.addAll(villagerTradeAcquisitionAnalyzer.indexedItemIds());
+            Map<String, List<AcquisitionPath>> availabilityPaths = resolveSurvivalPaths(candidates);
             for (String itemId : settings.allowsAutomaticDiscovery() ? candidates : java.util.Set.<String>of()) {
                 if (configuredByItem.containsKey(itemId)) {
                     continue;
@@ -211,7 +224,8 @@ public final class DynamicFoodEngine {
                     derivedExcluded++;
                     continue;
                 }
-                SurvivalAcquirabilityResolver.Result survival = survivalResolver.resolve(discoveredPaths);
+                SurvivalAcquirabilityResolver.Result survival = survivalResolver.resolve(
+                    availabilityPaths.getOrDefault(itemId, discoveredPaths));
                 if (survival.state() != SurvivalAcquirability.TRUE) {
                     if (survival.state() == SurvivalAcquirability.FALSE) {
                         survivalFalseExcluded++;
@@ -351,7 +365,21 @@ public final class DynamicFoodEngine {
     }
 
     public SurvivalAcquirabilityResolver.Result survivalAcquirability(String itemId) {
-        return new SurvivalAcquirabilityResolver().resolve(acquisitionPaths(itemId));
+        Map<String, List<AcquisitionPath>> availabilityPaths =
+            resolveSurvivalPaths(java.util.Set.of(itemId));
+        return new SurvivalAcquirabilityResolver().resolve(
+            availabilityPaths.getOrDefault(itemId, List.of()));
+    }
+
+    private Map<String, List<AcquisitionPath>> resolveSurvivalPaths(
+        java.util.Collection<String> resourceIds
+    ) {
+        java.util.Set<String> indexedIds = new java.util.TreeSet<>(resourceIds);
+        acquisitionAnalyzersForSnapshot().forEach(analyzer ->
+            indexedIds.addAll(analyzer.indexedItemIds()));
+        Map<String, List<AcquisitionPath>> pathsByResource = new java.util.TreeMap<>();
+        indexedIds.forEach(itemId -> pathsByResource.put(itemId, acquisitionPaths(itemId)));
+        return new SurvivalAcquirabilityResolver().resolvePathAvailability(pathsByResource);
     }
 
     public RecipeEconomicResult recipeEconomicResult(String itemId) {
@@ -374,22 +402,7 @@ public final class DynamicFoodEngine {
     }
 
     private List<AcquisitionPath> buildAcquisitionPaths(String itemId) {
-        AcquisitionAnalyzer analyzer = recipeGraphAcquisitionAnalyzer;
-        if (analyzer == null) {
-            synchronized (this) {
-                analyzer = recipeGraphAcquisitionAnalyzer;
-                if (analyzer == null) {
-                    analyzer = new RecipeGraphAcquisitionAnalyzer(graph, EconomicCostEvidenceProvider.unknown(),
-                        com.jorjik.dynamicfood.config.DynamicFoodConfig.materialCostReference(),
-                        com.jorjik.dynamicfood.config.DynamicFoodConfig.materialCostCap(),
-                        com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsReference(),
-                        com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsCap(),
-                        com.jorjik.dynamicfood.config.DynamicFoodConfig.timeCostReferenceTicks(),
-                        com.jorjik.dynamicfood.config.DynamicFoodConfig.timeCostCapTicks());
-                    recipeGraphAcquisitionAnalyzer = analyzer;
-                }
-            }
-        }
+        AcquisitionAnalyzer analyzer = recipeGraphAcquisitionAnalyzer();
         ArrayList<AcquisitionPath> paths = new ArrayList<>(analyzer.analyze(itemId));
         LootTableAcquisitionAnalyzer lootAnalyzer = lootTableAcquisitionAnalyzer;
         if (lootAnalyzer != null) {
@@ -406,6 +419,55 @@ public final class DynamicFoodEngine {
             }
         }
         return paths.stream().sorted(java.util.Comparator.comparing(AcquisitionPath::sourceId)).toList();
+    }
+
+    private synchronized AcquisitionAnalyzer recipeGraphAcquisitionAnalyzer() {
+        AcquisitionAnalyzer analyzer = recipeGraphAcquisitionAnalyzer;
+        if (analyzer == null) {
+            analyzer = new RecipeGraphAcquisitionAnalyzer(graph, EconomicCostEvidenceProvider.unknown(),
+                com.jorjik.dynamicfood.config.DynamicFoodConfig.materialCostReference(),
+                com.jorjik.dynamicfood.config.DynamicFoodConfig.materialCostCap(),
+                com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsReference(),
+                com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsCap(),
+                com.jorjik.dynamicfood.config.DynamicFoodConfig.timeCostReferenceTicks(),
+                com.jorjik.dynamicfood.config.DynamicFoodConfig.timeCostCapTicks());
+            recipeGraphAcquisitionAnalyzer = analyzer;
+        }
+        return analyzer;
+    }
+
+    public synchronized List<AcquisitionAnalyzer> acquisitionAnalyzersForSnapshot() {
+        return acquisitionAnalyzersForSnapshot(EconomicCostEvidenceProvider.unknown());
+    }
+
+    public synchronized List<AcquisitionAnalyzer> acquisitionAnalyzersForSnapshot(
+        EconomicCostEvidenceProvider independentEconomicEvidence
+    ) {
+        if (independentEconomicEvidence == null) {
+            throw new IllegalArgumentException("independent economic evidence provider is required");
+        }
+        List<AcquisitionAnalyzer> analyzers = new ArrayList<>();
+        analyzers.add(new RecipeGraphAcquisitionAnalyzer(graph, independentEconomicEvidence,
+            DynamicFoodConfig.materialCostReference(), DynamicFoodConfig.materialCostCap(),
+            DynamicFoodConfig.lootAttemptsReference(), DynamicFoodConfig.lootAttemptsCap(),
+            DynamicFoodConfig.timeCostReferenceTicks(), DynamicFoodConfig.timeCostCapTicks()));
+        if (lootTableAcquisitionAnalyzer != null) {
+            analyzers.add(lootTableAcquisitionAnalyzer);
+        }
+        if (worldgenAcquisitionAnalyzer != null) {
+            analyzers.add(worldgenAcquisitionAnalyzer);
+        }
+        analyzers.add(villagerTradeAcquisitionAnalyzer);
+        analyzers.addAll(acquisitionAnalyzers);
+        return List.copyOf(analyzers);
+    }
+
+    public void markStaticAcquisitionInputsReady() {
+        staticAcquisitionInputsReady = true;
+    }
+
+    public boolean staticAcquisitionInputsReady() {
+        return staticAcquisitionInputsReady;
     }
 
     public ResourceDifficulty resourceDifficulty(String itemId) {

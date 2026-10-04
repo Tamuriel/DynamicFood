@@ -64,8 +64,16 @@ public final class RecipeGraphReloadListener extends SimplePreparableReloadListe
             List<IngredientContribution> inputs = new ArrayList<>();
             List<AcquisitionIngredient> acquisitionInputs = new ArrayList<>();
             for (Ingredient ingredient : recipe.getIngredients()) {
-                inputs.add(resolveIngredientDefinition(ingredient));
+                if (ingredient.isEmpty()) {
+                    continue;
+                }
+                if (ingredient.hasNoItems()) {
+                    acquisitionInputs.add(new AcquisitionIngredient(
+                        List.of(), 1, AcquisitionIngredient.InputUse.UNKNOWN));
+                    continue;
+                }
                 ItemStack[] alternatives = ingredient.getItems();
+                inputs.add(resolveIngredientDefinition(ingredient));
                 acquisitionInputs.add(new AcquisitionIngredient(
                     java.util.Arrays.stream(alternatives)
                         .map(stack -> BuiltInRegistries.ITEM.getKey(stack.getItem()))
@@ -80,12 +88,14 @@ public final class RecipeGraphReloadListener extends SimplePreparableReloadListe
                 output.getCount(),
                 inputs,
                 processingTimeTicks(recipe),
-                acquisitionInputs
+                acquisitionInputs,
+                true
             ));
         }
         List<RecipeNode> immutableNodes = List.copyOf(nodes);
         engine.replaceStaticRecipes(immutableNodes);
         engine.rebuildLootTableAnalyzer(resourceManager);
+        engine.markStaticAcquisitionInputsReady();
         engine.rebuildCalibrationWithDiscovery(DynamicFoodConfig.economicProfiles(),
             DynamicFoodConfig.calibrationSettings());
         Set<String> loggedAmbiguities = new HashSet<>();
@@ -126,26 +136,37 @@ public final class RecipeGraphReloadListener extends SimplePreparableReloadListe
         return null;
     }
 
-    private static AcquisitionIngredient.InputUse classifyInputUse(ItemStack[] alternatives) {
+    static AcquisitionIngredient.InputUse classifyInputUse(ItemStack[] alternatives) {
         if (alternatives.length == 0) {
             return AcquisitionIngredient.InputUse.UNKNOWN;
         }
         boolean hasConsumed = false;
         boolean hasReusable = false;
         for (ItemStack alternative : alternatives) {
-            var remainder = alternative.getItem().getCraftingRemainingItem();
-            if (remainder == null) {
+            if (!alternative.hasCraftingRemainingItem()) {
                 hasConsumed = true;
-            } else if (remainder == alternative.getItem()) {
-                hasReusable = true;
             } else {
-                return AcquisitionIngredient.InputUse.UNKNOWN;
+                ItemStack remainder = alternative.getCraftingRemainingItem();
+                if (remainder.isEmpty()) {
+                    return AcquisitionIngredient.InputUse.UNKNOWN;
+                }
+                if (isReusableRemainder(alternative, remainder)) {
+                    hasReusable = true;
+                } else {
+                    return AcquisitionIngredient.InputUse.UNKNOWN;
+                }
             }
         }
         if (hasConsumed && hasReusable) {
             return AcquisitionIngredient.InputUse.UNKNOWN;
         }
         return hasReusable ? AcquisitionIngredient.InputUse.REUSABLE : AcquisitionIngredient.InputUse.CONSUMED;
+    }
+
+    static boolean isReusableRemainder(ItemStack input, ItemStack remainder) {
+        return !remainder.isEmpty()
+            && ItemStack.isSameItemSameComponents(input, remainder)
+            && input.getCount() == remainder.getCount();
     }
 
     private static IngredientContribution resolveIngredientDefinition(Ingredient ingredient) {

@@ -212,10 +212,6 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
             Map<String, EconomicFactor> costFactors = Map.ofEntries(
                 Map.entry("time_cost", EconomicFactor.unknown(
                     "worldgen data does not expose travel or mining time")),
-                Map.entry("startup_cost", EconomicFactor.notApplicable(
-                    "worldgen placement has no player startup operation")),
-                Map.entry("recurring_cost", EconomicFactor.notApplicable(
-                    "worldgen placement has no player recurring input operation")),
                 Map.entry("prerequisite_cost", EconomicFactor.notApplicable(
                     "worldgen feature definitions contain no player prerequisite operation")),
                 Map.entry("progression_cost", EconomicFactor.notApplicable(
@@ -287,6 +283,7 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
         }).toList();
     }
 
+    @Override
     public Set<String> indexedItemIds() {
         return sourcesByItem.keySet();
     }

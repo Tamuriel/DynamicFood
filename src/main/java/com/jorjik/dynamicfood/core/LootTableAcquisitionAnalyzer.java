@@ -22,6 +22,7 @@ import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.world.level.block.CropBlock;
 
 public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
+    private static final String EXPECTED_VALUE_EVALUATOR_VERSION = "minecraft-loot-expected-value-v1";
     private final Map<String, List<LootSource>> sourcesByItem;
     private final Map<String, List<ItemLootSource>> sourcesByTable;
     private final double attemptsReference;
@@ -145,17 +146,23 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         Map<String, AcquisitionMeasurement> measurements = new HashMap<>(Map.of(
             "probability", loot == null
                 ? AcquisitionMeasurement.unknown("exact loot probability was not retained")
-                : AcquisitionMeasurement.known(loot.probability()),
+                : AcquisitionMeasurement.analytical(loot.probability(),
+                    expectedValueMetadata(source.tableId(), "item inclusion probability")),
             "expected_yield_on_success", loot == null
                 ? AcquisitionMeasurement.unknown("exact conditional yield unavailable")
-                : AcquisitionMeasurement.known(loot.expectedYieldOnSuccess()),
-            "expected_units_per_attempt", AcquisitionMeasurement.known(source.expectedUnitsPerAttempt()),
+                : AcquisitionMeasurement.analytical(loot.expectedYieldOnSuccess(),
+                    expectedValueMetadata(source.tableId(), "conditional expected yield")),
+            "expected_units_per_attempt", AcquisitionMeasurement.analytical(source.expectedUnitsPerAttempt(),
+                expectedValueMetadata(source.tableId(), "expected item units per invocation")),
             "expected_attempts_per_unit",
-                AcquisitionMeasurement.known(1.0D / source.expectedUnitsPerAttempt())
+                AcquisitionMeasurement.analytical(1.0D / source.expectedUnitsPerAttempt(),
+                    expectedValueMetadata(source.tableId(), "reciprocal expected units per invocation"))
         ));
         for (int horizon : supportedHorizons()) {
             measurements.put("expected_attempts_to_obtain_" + horizon,
-                AcquisitionMeasurement.known(horizon / source.expectedUnitsPerAttempt()));
+                AcquisitionMeasurement.analytical(horizon / source.expectedUnitsPerAttempt(),
+                    expectedValueMetadata(source.tableId(), "normalized expected attempts for " + horizon
+                        + " expected units")));
         }
         addCropMeasurements(source, measurements);
         return new AcquisitionPath(itemId, source.sourceType(), source.tableId(), 1.0D,
@@ -168,21 +175,7 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         Map<String, EconomicFactor> factors = new HashMap<>();
         factors.put("quantity_cost", quantity);
         boolean canonicalQuantityKnown = quantity.isKnown();
-        factors.put("probability_cost", canonicalQuantityKnown
-            ? EconomicFactor.notApplicable("probability is already represented by expected units per attempt")
-            : EconomicFactor.unknown(probability == null
-                ? "probability is unknown and canonical expected quantity cannot be calculated"
-                : "probability is measured but dynamic loot behavior prevents canonical expected quantity"));
-        factors.put("yield_cost", canonicalQuantityKnown
-            ? EconomicFactor.notApplicable("conditional yield is already represented by expected units per attempt")
-            : EconomicFactor.unknown(expectedYield == null
-                ? "conditional yield is unknown and canonical expected quantity cannot be calculated"
-                : "conditional yield is measured but dynamic loot behavior prevents canonical expected quantity"));
         factors.put("time_cost", EconomicFactor.unknown("loot-table data does not expose time per acquisition attempt"));
-        factors.put("startup_cost", EconomicFactor.notApplicable(
-            "loot-table definitions do not describe one-time source setup"));
-        factors.put("recurring_cost", EconomicFactor.unknown(
-            "source-specific recurring inputs and tool replacement are not represented in loot tables"));
         factors.put("prerequisite_cost", EconomicFactor.unknown(
             "source access requirements are not represented by loot output data"));
         factors.put("progression_cost", EconomicFactor.unknown(
@@ -212,7 +205,8 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
             : AcquisitionMeasurement.known(crop.getMaxAge()));
         measurements.put("crop_harvest_expected_units_per_loot_invocation", source.expectedUnitsPerAttempt() == null
             ? AcquisitionMeasurement.unknown("crop loot functions or conditions prevent exact yield calculation")
-            : AcquisitionMeasurement.known(source.expectedUnitsPerAttempt()));
+            : AcquisitionMeasurement.analytical(source.expectedUnitsPerAttempt(),
+                expectedValueMetadata(source.tableId(), "crop harvest expected units per loot invocation")));
         AcquisitionMeasurement growthTime = AcquisitionMeasurement.unknown(
             "CropBlock random-tick growth depends on runtime environment and random tick settings");
         AcquisitionMeasurement seedReturn = AcquisitionMeasurement.unknown(
@@ -224,6 +218,13 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         measurements.put("crop_seed_return_per_cycle", seedReturn);
         measurements.put("crop_seeds_required_per_cycle", seedsRequired);
         measurements.put("crop_external_seed_input_per_cycle", cycle.externalSeedsRequiredPerCycle());
+    }
+
+    private static EstimateMetadata expectedValueMetadata(String tableId, String metric) {
+        return new EstimateMetadata("supported_minecraft_loot_expected_value", EXPECTED_VALUE_EVALUATOR_VERSION,
+            Map.of("loot_table", tableId, "metric", metric),
+            List.of("uses statically supported loot entries, weights, and literal roll counts",
+                "conditions or functions that affect the metric remain UNKNOWN"));
     }
 
     private static CropBlock cropBlock(LootSource source) {
@@ -330,6 +331,7 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         return Map.copyOf(counts);
     }
 
+    @Override
     public Set<String> indexedItemIds() {
         return sourcesByItem.keySet();
     }

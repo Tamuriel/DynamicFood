@@ -1,27 +1,38 @@
 package com.jorjik.dynamicfood.core;
 
+import com.jorjik.dynamicfood.config.DynamicFoodConfig;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
 public final class EconomicCostResolver {
+    public static final String POLICY_PRIMITIVE_ID = "dynamicfood:economic-policy-v1";
+
     private EconomicCostResolver() {}
 
     @Deprecated(forRemoval = false)
     public static EconomicCostResolution resolve(String itemId, List<AcquisitionPath> paths, int horizon,
-        PrimaryPathStrategy strategy, Map<String, Double> feasibilityWeights, Map<String, Double> ignoredCostWeights,
+        PrimaryPathStrategy strategy, Map<String, Double> feasibilityWeights, Map<String, Double> costWeights,
         double minimumFeasibility, double minimumFeasibilityCoverage, boolean allowPartialFeasibility,
         boolean ignoredAllowPartialCost) {
-        return resolve(itemId, paths, horizon, strategy, feasibilityWeights, minimumFeasibility,
-            minimumFeasibilityCoverage, allowPartialFeasibility);
+        return resolve(itemId, paths, horizon, strategy, feasibilityWeights, costWeights,
+            minimumFeasibility, minimumFeasibilityCoverage, allowPartialFeasibility);
     }
 
     public static EconomicCostResolution resolve(String itemId, List<AcquisitionPath> paths, int horizon,
         PrimaryPathStrategy strategy, Map<String, Double> feasibilityWeights,
         double minimumFeasibility, double minimumFeasibilityCoverage, boolean allowPartialFeasibility) {
-        if (horizon < 1) {
-            throw new IllegalArgumentException("economic horizon must be positive");
+        return resolve(itemId, paths, horizon, strategy, feasibilityWeights, DynamicFoodConfig.costFactorWeights(),
+            minimumFeasibility, minimumFeasibilityCoverage, allowPartialFeasibility);
+    }
+
+    public static EconomicCostResolution resolve(String itemId, List<AcquisitionPath> paths, int horizon,
+        PrimaryPathStrategy strategy, Map<String, Double> feasibilityWeights, Map<String, Double> costWeights,
+        double minimumFeasibility, double minimumFeasibilityCoverage, boolean allowPartialFeasibility) {
+        if (itemId == null || paths == null || strategy == null || feasibilityWeights == null
+            || costWeights == null || horizon < 1) {
+            throw new IllegalArgumentException("resource, paths, strategy, weights and positive horizon are required");
         }
         List<AcquisitionPath> itemPaths = paths.stream()
             .filter(path -> path.itemId().equals(itemId))
@@ -31,6 +42,13 @@ public final class EconomicCostResolver {
         List<String> reasons = new ArrayList<>();
         boolean incompleteCoverage = false;
         for (AcquisitionPath path : itemPaths) {
+            String survival = path.evidence().attributes().get("source_availability_classification");
+            if (!"TRUE".equalsIgnoreCase(survival)) {
+                incompleteCoverage |= survival == null || !"FALSE".equalsIgnoreCase(survival);
+                reasons.add(path.sourceId() + ": excluded because survival availability is "
+                    + (survival == null ? "UNKNOWN" : survival));
+                continue;
+            }
             FeasibilityResult feasibility = FeasibilityResolver.resolve(path, feasibilityWeights,
                 minimumFeasibilityCoverage, minimumFeasibility, allowPartialFeasibility);
             if (!feasibility.eligibleForPrimary()) {
@@ -41,26 +59,28 @@ public final class EconomicCostResolver {
             if (feasibility.status() == ResolutionStatus.PARTIAL) {
                 incompleteCoverage = true;
             }
-            EconomicCost target = path.economicCostAt(horizon);
-            if (!target.isKnown()) {
+            CostVector vector = path.costsByHorizon().get(horizon);
+            if (vector == null) {
+                reasons.add(path.sourceId() + ": no CostVector is available at economic horizon " + horizon);
                 incompleteCoverage = true;
-                reasons.add(path.sourceId() + ": EconomicCost UNKNOWN: " + target.evidence());
                 continue;
             }
-            eligible.add(new ResolvedPath(path, feasibility, target));
+            AcquisitionCost acquisitionCost = AcquisitionCostResolver.resolve(vector, costWeights);
+            if (acquisitionCost.status() == ResolutionStatus.UNKNOWN) {
+                reasons.add(path.sourceId() + ": AcquisitionCost UNKNOWN; core missing="
+                    + acquisitionCost.missingFactors());
+                incompleteCoverage = true;
+                continue;
+            }
+            EconomicCost target = EconomicCost.known(acquisitionCost.cost(), POLICY_PRIMITIVE_ID, horizon,
+                "policy-defined scalar promoted from AcquisitionCost for path " + path.sourceId()
+                    + "; additional factor coverage=" + acquisitionCost.additionalCoverage());
+            eligible.add(new ResolvedPath(path, feasibility, acquisitionCost, target));
         }
 
         if (eligible.isEmpty()) {
-            reasons.add("no eligible acquisition path has independently evidenced EconomicCost at horizon " + horizon);
-            return unknown(horizon, null, itemPaths, 0.0D, reasons);
-        }
-
-        EconomicCost basis = eligible.getFirst().target();
-        List<ResolvedPath> incompatible = eligible.stream()
-            .filter(value -> !basis.hasCompatibleBasis(value.target()))
-            .toList();
-        if (!incompatible.isEmpty()) {
-            reasons.add("eligible acquisition paths use incompatible economic primitives or horizons");
+            reasons.add("no survival-valid, feasible acquisition path has a CORE-COMPLETE AcquisitionCost at horizon "
+                + horizon);
             return unknown(horizon, null, itemPaths, 0.0D, reasons);
         }
 
@@ -74,7 +94,7 @@ public final class EconomicCostResolver {
         if (strategy == PrimaryPathStrategy.BEST_REPEATABLE_COST) {
             strategyPaths = eligible.stream().filter(value -> Boolean.TRUE.equals(value.path().repeatable())).toList();
             if (strategyPaths.isEmpty()) {
-                reasons.add("no eligible repeatable path with an evidenced EconomicCost");
+                reasons.add("no eligible repeatable path with a resolved AcquisitionCost");
                 return unknown(horizon, null, itemPaths, 0.0D, reasons);
             }
         }
@@ -91,12 +111,12 @@ public final class EconomicCostResolver {
             double accumulatedFeasibility = 0.0D;
             value = 0.0D;
             for (ResolvedPath path : strategyPaths) {
-                double pathFeasibility = path.feasibility().feasibility();
-                if (pathFeasibility == 0.0D) {
+                double weight = path.feasibility().feasibility();
+                if (weight == 0.0D) {
                     continue;
                 }
-                double nextFeasibility = accumulatedFeasibility + pathFeasibility;
-                value += (path.target().value() - value) * (pathFeasibility / nextFeasibility);
+                double nextFeasibility = accumulatedFeasibility + weight;
+                value += (path.target().value() - value) * (weight / nextFeasibility);
                 accumulatedFeasibility = nextFeasibility;
             }
             double selectedValue = value;
@@ -117,13 +137,14 @@ public final class EconomicCostResolver {
             representative = strategyPaths.getFirst();
             value = representative.target().value();
         }
-        if (!Double.isFinite(value) || value < 0.0D) {
-            reasons.add("eligible acquisition path aggregation produced an invalid EconomicCost");
+        if (!Double.isFinite(value) || value < 0.0D || value > 1.0D) {
+            reasons.add("economic policy aggregation produced a value outside [0,1]");
             return unknown(horizon, null, itemPaths, 0.0D, reasons);
         }
 
-        EconomicCost target = EconomicCost.known(value, basis.primitiveId(), horizon,
-            "resolved from " + strategyPaths.size() + " eligible acquisition path(s); " + basis.evidence());
+        EconomicCost target = EconomicCost.known(value, POLICY_PRIMITIVE_ID, horizon,
+            "resolved using " + strategy + " from " + strategyPaths.size()
+                + " eligible path-level AcquisitionCost value(s)");
         ResolutionStatus status = incompleteCoverage ? ResolutionStatus.PARTIAL : ResolutionStatus.COMPLETE;
         double confidence = representative.path().confidence();
         if (representative.feasibility().status() == ResolutionStatus.PARTIAL) {
@@ -131,8 +152,8 @@ public final class EconomicCostResolver {
         }
         List<AcquisitionPath> alternatives = itemPaths.stream()
             .filter(path -> !path.sourceId().equals(representative.path().sourceId())).toList();
-        reasons.add("EconomicCost resolved from independently evidenced primitive '" + basis.primitiveId()
-            + "' at observation horizon " + horizon);
+        reasons.add("EconomicCost promoted from policy AcquisitionCost using " + strategy
+            + " at economic horizon " + horizon);
         return new EconomicCostResolution(target, null, status, horizon, representative.path(), alternatives,
             Math.max(0.0D, Math.min(1.0D, confidence)), reasons);
     }
@@ -140,10 +161,11 @@ public final class EconomicCostResolver {
     private static EconomicCostResolution unknown(int horizon, AcquisitionPath primaryPath,
         List<AcquisitionPath> paths, double confidence, List<String> reasons) {
         return new EconomicCostResolution(EconomicCost.unknown(
-            "no compatible independently evidenced EconomicCost could be resolved"), null,
+            "no eligible acquisition path has a resolved policy AcquisitionCost"), null,
             ResolutionStatus.UNKNOWN, horizon, primaryPath, paths, confidence, reasons);
     }
 
-    private record ResolvedPath(AcquisitionPath path, FeasibilityResult feasibility, EconomicCost target) {
+    private record ResolvedPath(AcquisitionPath path, FeasibilityResult feasibility,
+        AcquisitionCost acquisitionCost, EconomicCost target) {
     }
 }

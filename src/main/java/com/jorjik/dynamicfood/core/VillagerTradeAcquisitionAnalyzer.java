@@ -118,15 +118,7 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
                 costs.clear();
                 costs.put("quantity_cost", FactorNormalizer.quantityCostForHorizon(output.outputCount(),
                     horizon, DynamicFoodConfig.lootAttemptsReference(), DynamicFoodConfig.lootAttemptsCap()));
-                costs.put("probability_cost", EconomicFactor.notApplicable(
-                    "the player selects a listed trade instead of randomly selecting an offer"));
-                costs.put("yield_cost", EconomicFactor.notApplicable(
-                    "completed trade output quantity is represented by quantity_cost"));
                 costs.put("time_cost", EconomicFactor.unknown("trade data does not expose time per completed offer"));
-                costs.put("startup_cost", EconomicFactor.notApplicable(
-                    "trade listing has no separate one-time setup input"));
-                costs.put("recurring_cost", EconomicFactor.notApplicable(
-                    "repeated trade inputs are represented by material_cost"));
                 costs.put("prerequisite_cost", EconomicFactor.unknown(
                     "profession and workstation access costs are not resolved"));
                 costs.put("progression_cost", output.level() == 1
@@ -148,9 +140,9 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
             EconomicFactor quantity = FactorNormalizer.quantityCostForHorizon(output.outputCount(), 1,
                 DynamicFoodConfig.lootAttemptsReference(), DynamicFoodConfig.lootAttemptsCap());
             Map<String, AcquisitionMeasurement> evidence = new HashMap<>(Map.of(
-                "output_quantity_per_completed_offer", AcquisitionMeasurement.known(output.outputCount()),
-                "expected_units_per_attempt", AcquisitionMeasurement.known(output.outputCount()),
-                "expected_attempts_per_unit", AcquisitionMeasurement.known(1.0D / output.outputCount()),
+                "output_quantity_per_completed_offer", AcquisitionMeasurement.exact(output.outputCount()),
+                "expected_units_per_attempt", AcquisitionMeasurement.exact(output.outputCount()),
+                "expected_attempts_per_unit", AcquisitionMeasurement.exact(1.0D / output.outputCount()),
                 "offer_selection_probability", AcquisitionMeasurement.known(1.0D),
                 "maximum_uses", AcquisitionMeasurement.known(output.maxUses()),
                 "villager_level", AcquisitionMeasurement.known(output.level()),
@@ -168,7 +160,7 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
                 "the required level is recorded, but villager leveling inputs and progression are unresolved"));
             for (int horizon : supportedHorizons()) {
                 evidence.put("expected_successful_offers_to_obtain_" + horizon,
-                    AcquisitionMeasurement.known(horizon / (double) output.outputCount()));
+                    AcquisitionMeasurement.exact(horizon / (double) output.outputCount()));
             }
             return new AcquisitionPath(itemId, "villager_trade", output.sourceId(), 1.0D,
                 null, null, null, false,
@@ -240,6 +232,7 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
         return count == 0 ? Map.of() : Map.of("villager_trade", count);
     }
 
+    @Override
     public java.util.Set<String> indexedItemIds() {
         return outputsByItem.keySet();
     }

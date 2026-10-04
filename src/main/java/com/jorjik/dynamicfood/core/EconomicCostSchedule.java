@@ -45,8 +45,8 @@ public record EconomicCostSchedule(
         if (recurringPerOutput.state() == EconomicComponentState.KNOWN) {
             total += recurringPerOutput.amount() * observationHorizon;
         }
-        if (!Double.isFinite(total)) {
-            return EconomicCost.unknown("horizon aggregation produced a non-finite economic amount");
+        if (!Double.isFinite(total) || total < 0.0D || total > 1.0D) {
+            return EconomicCost.unknown("horizon aggregation is outside the policy scale [0,1]");
         }
         return EconomicCost.known(total, primitiveId, observationHorizon,
             "startup once + recurring per output × observation horizon; " + evidence);

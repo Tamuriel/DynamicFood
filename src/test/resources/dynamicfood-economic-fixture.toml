@@ -1,0 +1,8 @@
+[food_calibration]
+economic_resources = ["minecraft:wheat|0.25|1|-|TRUE"]
+
+[ingredients]
+profiles = ["minecraft:wheat|-1|-1|1|true|true"]
+
+[acquisition.feasibility]
+allow_partial = true

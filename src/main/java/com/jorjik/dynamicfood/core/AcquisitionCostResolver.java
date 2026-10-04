@@ -8,9 +8,18 @@ public final class AcquisitionCostResolver {
     private AcquisitionCostResolver() {}
 
     public static AcquisitionCost resolve(CostVector vector, Map<String, Double> factorWeights) {
-        double weightedCost = 0.0D;
-        double knownWeight = 0.0D;
-        double configuredWeight = 0.0D;
+        if (vector == null || factorWeights == null) {
+            throw new IllegalArgumentException("cost vector and factor weights are required");
+        }
+        factorWeights.forEach((name, weight) -> {
+            if (name == null || weight == null || !Double.isFinite(weight) || weight < 0.0D) {
+                throw new IllegalArgumentException("factor weights must be finite and non-negative");
+            }
+            if (!CostVector.CORE_FACTORS.contains(name) && !CostVector.ADDITIONAL_FACTORS.contains(name)) {
+                throw new IllegalArgumentException("unsupported economic policy factor: " + name);
+            }
+        });
+        double maxIncludedWeight = 0.0D;
         Map<String, Double> used = new LinkedHashMap<>();
         Map<String, String> missing = new LinkedHashMap<>();
         Map<String, String> notApplicable = new LinkedHashMap<>();
@@ -19,34 +28,34 @@ public final class AcquisitionCostResolver {
             if (!Double.isFinite(weight) || weight < 0.0D) {
                 throw new IllegalArgumentException("factor weights must be finite and non-negative");
             }
-            if (weight == 0.0D) {
-                continue;
-            }
             EconomicFactor factor = vector.factors().get(entry.getKey());
             if (factor != null && factor.isNotApplicable()) {
                 notApplicable.put(entry.getKey(), factor.reason());
                 continue;
             }
-            configuredWeight += weight;
-            if (factor == null || !factor.isKnown()) {
+            if (factor == null || factor.isUnknown()) {
                 missing.put(entry.getKey(), factor == null
                     ? "applicability was not reported by the acquisition analyzer" : factor.reason());
                 continue;
             }
-            weightedCost += factor.value() * weight;
-            knownWeight += weight;
             used.put(entry.getKey(), factor.value());
+            maxIncludedWeight = Math.max(maxIncludedWeight, weight);
         }
-        if (configuredWeight <= 0.0D) {
+        Map<String, String> unknownCore = vector.unknownCoreFactors();
+        unknownCore.forEach(missing::putIfAbsent);
+        double additionalCoverage = vector.additionalCoverage(factorWeights);
+        if (!unknownCore.isEmpty() || maxIncludedWeight <= 0.0D) {
             return new AcquisitionCost(null, ResolutionStatus.UNKNOWN, vector.economicHorizon(), used,
-                missing, notApplicable);
+                missing, notApplicable, additionalCoverage);
         }
-        if (knownWeight == 0.0D) {
-            return new AcquisitionCost(null, ResolutionStatus.UNKNOWN, vector.economicHorizon(), used,
-                missing, notApplicable);
+        double weightedCost = 0.0D;
+        double includedWeight = 0.0D;
+        for (Map.Entry<String, Double> entry : used.entrySet()) {
+            double relativeWeight = factorWeights.get(entry.getKey()) / maxIncludedWeight;
+            weightedCost += entry.getValue() * relativeWeight;
+            includedWeight += relativeWeight;
         }
-        ResolutionStatus status = knownWeight == configuredWeight ? ResolutionStatus.COMPLETE : ResolutionStatus.PARTIAL;
-        return new AcquisitionCost(weightedCost / knownWeight, status, vector.economicHorizon(), used,
-            missing, notApplicable);
+        return new AcquisitionCost(weightedCost / includedWeight, ResolutionStatus.COMPLETE,
+            vector.economicHorizon(), used, missing, notApplicable, additionalCoverage);
     }
 }

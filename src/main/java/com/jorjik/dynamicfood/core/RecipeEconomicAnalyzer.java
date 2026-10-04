@@ -80,11 +80,6 @@ public final class RecipeEconomicAnalyzer {
             result = unknown(itemId, attemptedPaths.stream().distinct().toList(),
                 cycles.stream().distinct().sorted().toList(),
                 missing.stream().distinct().sorted().toList());
-        } else if (!missing.isEmpty() || !cycles.isEmpty()) {
-            missing.add("one or more recipe alternatives have unresolved or cyclic economic inputs");
-            result = unknown(itemId, attemptedPaths.stream().distinct().toList(),
-                cycles.stream().distinct().sorted().toList(),
-                missing.stream().distinct().sorted().toList());
         } else {
             String primitive = viable.getFirst().target().primitiveId();
             if (viable.stream().anyMatch(candidate ->
@@ -95,7 +90,13 @@ public final class RecipeEconomicAnalyzer {
                 viable.sort(java.util.Comparator
                     .comparingDouble((RecipeEconomicResult candidate) -> candidate.target().value())
                     .thenComparing(candidate -> String.join("|", candidate.recipePath())));
-                result = viable.getFirst();
+                RecipeEconomicResult selected = viable.getFirst();
+                List<String> distinctMissing = missing.stream().distinct().sorted().toList();
+                List<String> distinctCycles = cycles.stream().distinct().sorted().toList();
+                result = distinctMissing.isEmpty() && distinctCycles.isEmpty()
+                    && selected.status() == ResolutionStatus.COMPLETE
+                    ? selected
+                    : partial(selected, distinctCycles, distinctMissing);
             }
         }
         // A finalized UNKNOWN may include a back-edge; cache it to avoid re-expanding shared cyclic branches.
@@ -115,6 +116,8 @@ public final class RecipeEconomicAnalyzer {
         List<String> recipePath = new ArrayList<>(List.of(recipe.recipeId()));
         List<String> cycles = new ArrayList<>();
         List<String> missing = new ArrayList<>();
+        List<String> diagnostics = new ArrayList<>();
+        boolean partial = false;
         for (AcquisitionIngredient ingredient : ingredients) {
             if (ingredient.inputUse() == AcquisitionIngredient.InputUse.REUSABLE) {
                 recipePath.add("reusable input " + ingredient.alternatives());
@@ -127,11 +130,13 @@ public final class RecipeEconomicAnalyzer {
             RecipeEconomicResult child = resolveIngredient(ingredient.alternatives(), horizon,
                 path, visiting, memo);
             cycles.addAll(child.detectedCycles());
-            missing.addAll(child.missingInputs());
             if (!child.target().isKnown()) {
+                missing.addAll(child.missingInputs());
                 missing.add("unknown input " + ingredient.alternatives());
                 continue;
             }
+            diagnostics.addAll(child.missingInputs());
+            partial |= child.status() == ResolutionStatus.PARTIAL || !child.detectedCycles().isEmpty();
             EconomicCost childCost = child.target();
             if (childCost.observationHorizon() != horizon) {
                 missing.add("input " + ingredient.alternatives() + " is measured at an incompatible horizon");
@@ -146,19 +151,28 @@ public final class RecipeEconomicAnalyzer {
             rawMaterialCost += childCost.value() * ingredient.count();
             recipePath.addAll(child.recipePath());
         }
-        if (!missing.isEmpty() || basis == null || !Double.isFinite(rawMaterialCost)) {
+        if (!missing.isEmpty()) {
+            diagnostics.addAll(missing);
             return unknown(recipe.resultId(), recipePath, cycles.stream().distinct().sorted().toList(),
-                missing.isEmpty() ? List.of("recipe material cost is not representable") : missing);
+                diagnostics.stream().distinct().sorted().toList());
+        }
+        if (basis == null || !Double.isFinite(rawMaterialCost)) {
+            return unknown(recipe.resultId(), recipePath, cycles.stream().distinct().sorted().toList(),
+                diagnostics.isEmpty() ? List.of("recipe material cost is not representable") : diagnostics);
         }
         double perOutputCost = rawMaterialCost / recipe.outputCount();
-        if (!Double.isFinite(perOutputCost)) {
+        if (!Double.isFinite(perOutputCost) || perOutputCost < 0.0D || perOutputCost > 1.0D) {
             return unknown(recipe.resultId(), recipePath, cycles.stream().distinct().sorted().toList(),
-                List.of("recipe output normalization produced a non-finite economic amount"));
+                List.of("recursive material EconomicCost is outside the policy scale [0,1]"));
         }
         EconomicCost target = EconomicCost.known(perOutputCost, basis.primitiveId(), horizon,
             "recursive ingredient quantities divided by deterministic recipe output count");
-        return new RecipeEconomicResult(recipe.resultId(), target, ResolutionStatus.COMPLETE,
-            recipePath, cycles.stream().distinct().sorted().toList(), List.of());
+        List<String> distinctCycles = cycles.stream().distinct().sorted().toList();
+        List<String> distinctMissing = diagnostics.stream().distinct().sorted().toList();
+        return new RecipeEconomicResult(recipe.resultId(), target,
+            partial || !distinctCycles.isEmpty() || !distinctMissing.isEmpty()
+                ? ResolutionStatus.PARTIAL : ResolutionStatus.COMPLETE,
+            recipePath, distinctCycles, distinctMissing);
     }
 
     private RecipeEconomicResult resolveIngredient(List<String> alternatives, int horizon,
@@ -168,23 +182,37 @@ public final class RecipeEconomicAnalyzer {
         }
         List<RecipeEconomicResult> candidates = alternatives.stream().sorted()
             .map(itemId -> resolve(itemId, horizon, path, visiting, memo)).toList();
-        RecipeEconomicResult selected = candidates.getFirst();
         List<String> cycles = candidates.stream().flatMap(candidate -> candidate.detectedCycles().stream())
             .distinct().sorted().toList();
-        List<String> missing = candidates.stream().flatMap(candidate -> candidate.missingInputs().stream())
-            .distinct().sorted().toList();
-        if (candidates.stream().anyMatch(candidate -> !candidate.target().isKnown())) {
-            return unknown(selected.itemId(), List.of(), cycles, missing);
+        List<RecipeEconomicResult> known = candidates.stream()
+            .filter(candidate -> candidate.target().isKnown()).toList();
+        List<String> missing = new ArrayList<>(candidates.stream()
+            .flatMap(candidate -> candidate.missingInputs().stream()).toList());
+        candidates.stream().filter(candidate -> !candidate.target().isKnown())
+            .map(candidate -> "unresolved alternative " + candidate.itemId())
+            .forEach(missing::add);
+        if (known.isEmpty()) {
+            return unknown(candidates.getFirst().itemId(), List.of(), cycles,
+                missing.stream().distinct().sorted().toList());
         }
+        RecipeEconomicResult selected = known.getFirst();
         EconomicCost selectedCost = selected.target();
-        for (RecipeEconomicResult candidate : candidates) {
+        for (RecipeEconomicResult candidate : known) {
             if (!selectedCost.hasCompatibleBasis(candidate.target())
                 || Double.compare(selectedCost.value(), candidate.target().value()) != 0) {
                 return unknown(selected.itemId(), List.of(), cycles,
                     List.of("ingredient alternatives have different evidenced economic costs"));
             }
         }
-        return selected;
+        return missing.isEmpty() && cycles.isEmpty()
+            && known.stream().allMatch(candidate -> candidate.status() == ResolutionStatus.COMPLETE)
+            ? selected : partial(selected, cycles, missing.stream().distinct().sorted().toList());
+    }
+
+    private static RecipeEconomicResult partial(RecipeEconomicResult resolved,
+        List<String> cycles, List<String> missing) {
+        return new RecipeEconomicResult(resolved.itemId(), resolved.target(), ResolutionStatus.PARTIAL,
+            resolved.recipePath(), cycles, missing);
     }
 
     private static RecipeEconomicResult unknown(String itemId, List<String> path,

@@ -4,5 +4,6 @@ public enum CalibrationStatus {
     VALID,
     LOW_SAMPLE,
     DEGENERATE,
-    EMPTY
+    EMPTY,
+    DISABLED
 }

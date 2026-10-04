@@ -54,6 +54,18 @@ tasks.named('test') {
     useJUnitPlatform()
 }
 
+tasks.register('prepareDynamicFoodEconomicGameTestConfig') {
+    def fixture = layout.projectDirectory.file('src/test/resources/dynamicfood-economic-fixture.toml')
+    def target = layout.projectDirectory.file(
+        'run/gameTestServer-economic-fixture/config/dynamicfood-common.toml')
+    inputs.file(fixture)
+    outputs.file(target)
+    doLast {
+        target.asFile.parentFile.mkdirs()
+        target.asFile.bytes = fixture.asFile.bytes
+    }
+}
+
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }

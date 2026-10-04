@@ -14,8 +14,6 @@ public final class RecipeGraphAcquisitionAnalyzer implements AcquisitionAnalyzer
     private final double quantityCap;
     private final double timeReferenceTicks;
     private final double timeCapTicks;
-    private final double materialReference;
-    private final double materialCap;
 
     public RecipeGraphAcquisitionAnalyzer(RecipeGraph graph, EconomicCostEvidenceProvider independentEvidence,
         double materialReference, double materialCap) {
@@ -42,13 +40,16 @@ public final class RecipeGraphAcquisitionAnalyzer implements AcquisitionAnalyzer
         this.quantityCap = quantityCap;
         this.timeReferenceTicks = timeReferenceTicks;
         this.timeCapTicks = timeCapTicks;
-        this.materialReference = materialReference;
-        this.materialCap = materialCap;
     }
 
     @Override
     public boolean supports(String itemId) {
         return !graph.recipesFor(itemId).isEmpty();
+    }
+
+    @Override
+    public java.util.Set<String> indexedItemIds() {
+        return graph.resultItemIds();
     }
 
     @Override
@@ -64,22 +65,18 @@ public final class RecipeGraphAcquisitionAnalyzer implements AcquisitionAnalyzer
                 Map<String, EconomicFactor> costFactors = new java.util.LinkedHashMap<>();
                 costFactors.put("quantity_cost", FactorNormalizer.quantityCostForHorizon(recipe.outputCount(),
                     horizon, quantityReference, quantityCap));
-                costFactors.put("time_cost", recipe.processingTimeTicks() == null
-                    ? EconomicFactor.unknown("processing duration is not exposed by this recipe type")
-                    : FactorNormalizer.logarithmic(recipe.processingTimeTicks() / recipe.outputCount() * horizon,
-                        timeReferenceTicks, timeCapTicks));
+                costFactors.put("time_cost", recipe.processingTimeTicks() != null
+                    ? FactorNormalizer.logarithmic(recipe.processingTimeTicks() / recipe.outputCount() * horizon,
+                        timeReferenceTicks, timeCapTicks)
+                    : recipe.recipeType().equals("minecraft:crafting")
+                        ? EconomicFactor.notApplicable(
+                            "crafting recipes have no time-based processing mechanic")
+                        : EconomicFactor.unknown("processing duration is not exposed by this recipe type"));
                 costFactors.put("material_cost", !resolved.target().isKnown()
-                    ? EconomicFactor.unknown("EconomicCost is UNKNOWN: " + resolved.target().evidence())
-                    : EconomicFactor.notApplicable(
-                        "recursive material EconomicCost is the canonical magnitude and is not normalized again"));
-                costFactors.put("probability_cost", EconomicFactor.notApplicable(
-                    "recipe output quantity is deterministic and represented by quantity_cost"));
-                costFactors.put("yield_cost", EconomicFactor.notApplicable(
-                    "recipe output quantity is represented by quantity_cost"));
-                costFactors.put("startup_cost", EconomicFactor.notApplicable(
-                    "static recipe data exposes no separate one-time setup operation"));
-                costFactors.put("recurring_cost", EconomicFactor.notApplicable(
-                    "recurring inputs and processing are represented by material_cost and time_cost"));
+                    || resolved.status() != ResolutionStatus.COMPLETE
+                    ? EconomicFactor.unknown("recursive material EconomicCost is UNKNOWN: "
+                        + resolved.target().evidence() + "; recursion status=" + resolved.status())
+                    : EconomicFactor.known(resolved.target().value()));
                 costFactors.put("prerequisite_cost", EconomicFactor.notApplicable(
                     "recipe definition exposes no separate acquisition prerequisite"));
                 costFactors.put("progression_cost", EconomicFactor.notApplicable(
@@ -99,14 +96,15 @@ public final class RecipeGraphAcquisitionAnalyzer implements AcquisitionAnalyzer
                     .anyMatch(input -> input.inputUse() ==
                         com.jorjik.dynamicfood.graph.AcquisitionIngredient.InputUse.UNKNOWN)
                     ? EconomicFactor.unknown("recipe input consumption or remainder is unresolved")
-                    : EconomicFactor.notApplicable("consumed recipe inputs are included in material_cost"));
+                    : EconomicFactor.notApplicable(
+                        "consumed recipe inputs are represented by the recursive material EconomicCost"));
                 costsByHorizon.put(horizon, new CostVector(horizon, costFactors));
             }
             RecipeEconomicResult resolved = economics.resolveUsingRecipe(recipe,
                 com.jorjik.dynamicfood.config.DynamicFoodConfig.acquisitionEconomicHorizon());
             Map<String, AcquisitionMeasurement> measurements = new HashMap<>();
-            measurements.put("expected_units_per_attempt", AcquisitionMeasurement.known(recipe.outputCount()));
-            measurements.put("expected_attempts_per_unit", AcquisitionMeasurement.known(1.0D / recipe.outputCount()));
+            measurements.put("expected_units_per_attempt", AcquisitionMeasurement.exact(recipe.outputCount()));
+            measurements.put("expected_attempts_per_unit", AcquisitionMeasurement.exact(1.0D / recipe.outputCount()));
             measurements.put("processing_time_ticks", recipe.processingTimeTicks() == null
                 ? AcquisitionMeasurement.unknown("processing duration is not exposed by this recipe type")
                 : AcquisitionMeasurement.known(recipe.processingTimeTicks()));
@@ -116,13 +114,18 @@ public final class RecipeGraphAcquisitionAnalyzer implements AcquisitionAnalyzer
             for (int horizon : List.of(1, 10, 100,
                 com.jorjik.dynamicfood.config.DynamicFoodConfig.acquisitionEconomicHorizon())) {
                 measurements.put("expected_attempts_to_obtain_" + horizon,
-                    AcquisitionMeasurement.known(horizon / (double) recipe.outputCount()));
+                    AcquisitionMeasurement.exact(horizon / (double) recipe.outputCount()));
             }
             Map<String, String> attributes = new HashMap<>();
             attributes.put("recipe_type", recipe.recipeType());
+            attributes.put("recipe_operation_availability", recipe.activeInRecipeManager() ? "TRUE" : "UNKNOWN");
+            attributes.put("recipe_operation_availability_reason", recipe.activeInRecipeManager()
+                ? "recipe holder is present in the active server RecipeManager after datapack loading"
+                : "recipe operation is not evidenced as active in the server RecipeManager");
             attributes.put("canonical_quantity_source", "recipe outputCount");
             attributes.put("canonical_quantity_unit", "item per completed recipe operation");
             attributes.put("canonical_quantity_semantics", "guaranteed deterministic output count per operation");
+            attributes.put("recursive_economic_resolution_status", resolved.status().name());
             attributes.put("survival_availability",
                 "unknown: recipe registration does not prove player access or progression requirements");
             attributes.put("source_availability_classification", "UNKNOWN");
@@ -136,7 +139,8 @@ public final class RecipeGraphAcquisitionAnalyzer implements AcquisitionAnalyzer
             }
             paths.add(new AcquisitionPath(itemId, "recipe", recipe.recipeId(), 1.0D,
                 null, null, true, false, recipeFeasibilityFactors(recipe), costsByHorizon,
-                new AcquisitionEvidence(measurements, attributes), resolved.target()));
+                new AcquisitionEvidence(measurements, attributes, recipe.acquisitionIngredients()),
+                resolved.target()));
         }
         return List.copyOf(paths);
     }
