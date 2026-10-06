@@ -69,10 +69,12 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 table.expectedUnitsByItem().forEach((itemId, expectedUnits) ->
                     sources.computeIfAbsent(itemId, ignored -> new ArrayList<>())
                         .add(new LootSource(table.tableId(), table.sourceType(), expectedUnits,
-                            table.evidenceByItem().get(itemId))));
+                            table.evidenceByItem().get(itemId),
+                            table.ordinaryPlayerBreakOutputs().contains(itemId))));
                 table.unknownItems().stream().sorted().forEach(itemId ->
                     sources.computeIfAbsent(itemId, ignored -> new ArrayList<>())
-                        .add(new LootSource(table.tableId(), table.sourceType(), null, null)));
+                        .add(new LootSource(table.tableId(), table.sourceType(), null, null,
+                            table.ordinaryPlayerBreakOutputs().contains(itemId))));
             });
         Map<String, List<LootSource>> frozen = new HashMap<>();
         sources.forEach((itemId, values) -> frozen.put(itemId, values.stream()
@@ -283,6 +285,11 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         attributes.put("survival_availability",
             "unknown: loot-table presence does not prove that its triggering mechanic is available in survival");
         attributes.put("source_availability_classification", "UNKNOWN");
+        attributes.put("ordinary_player_break_output_evidence",
+            source.ordinaryPlayerBreakOutput() ? "TRUE" : "UNKNOWN");
+        attributes.put("ordinary_player_break_output_reason", source.ordinaryPlayerBreakOutput()
+            ? "registered block loot has one direct block-item entry, one ordinary roll, and no non-explosion condition or function"
+            : "ordinary player block-break output is not established by the supported direct-drop loot pattern");
         ResourceLocation tableId = ResourceLocation.tryParse(source.tableId());
         if (tableId == null) {
             return Map.copyOf(attributes);
@@ -386,13 +393,102 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
 
     static Optional<ParsedTable> parseTable(String tableId, JsonObject root) {
         Optional<ParsedTable> exact = parseExactTable(tableId, root);
+        ParsedTable parsed;
         if (exact.isPresent()) {
-            return exact;
+            parsed = exact.get();
+        } else {
+            Set<String> possibleItems = possibleItemOutputs(root);
+            if (possibleItems.isEmpty()) {
+                return Optional.empty();
+            }
+            parsed = new ParsedTable(tableId, sourceType(ResourceLocation.parse(tableId)),
+                Map.of(), possibleItems);
         }
-        Set<String> possibleItems = possibleItemOutputs(root);
-        return possibleItems.isEmpty() ? Optional.empty()
-            : Optional.of(new ParsedTable(tableId, sourceType(ResourceLocation.parse(tableId)),
-                Map.of(), possibleItems));
+        return Optional.of(parsed.withOrdinaryPlayerBreakOutputs(
+            ordinaryPlayerBreakOutputs(tableId, root)));
+    }
+
+    private static Set<String> ordinaryPlayerBreakOutputs(String tableId, JsonObject root) {
+        ResourceLocation tableLocation = ResourceLocation.tryParse(tableId);
+        if (tableLocation == null || !sourceType(tableLocation).equals("block_loot")) {
+            return Set.of();
+        }
+        String path = tableLocation.getPath();
+        if (!path.startsWith("blocks/")) {
+            return Set.of();
+        }
+        ResourceLocation blockLocation = ResourceLocation.fromNamespaceAndPath(
+            tableLocation.getNamespace(), path.substring("blocks/".length()));
+        var block = BuiltInRegistries.BLOCK.getOptional(blockLocation).orElse(null);
+        if (block == null || block.asItem() == net.minecraft.world.item.Items.AIR
+            || !block.getLootTable().location().equals(tableLocation)
+            || !hasNoEntries(root, "functions") || root.has("neoforge:conditions")
+            || root.entrySet().stream().anyMatch(entry ->
+                !Set.of("type", "pools", "random_sequence").contains(entry.getKey()))) {
+            return Set.of();
+        }
+
+        JsonArray pools = root.getAsJsonArray("pools");
+        if (pools == null || pools.size() != 1 || !pools.get(0).isJsonObject()) {
+            return Set.of();
+        }
+        JsonObject pool = pools.get(0).getAsJsonObject();
+        if (!hasNoEntries(pool, "functions")
+            || pool.entrySet().stream().anyMatch(entry ->
+                !Set.of("rolls", "bonus_rolls", "conditions", "functions", "entries").contains(entry.getKey()))
+            || !onlyOrdinaryBlockBreakConditions(pool)) {
+            return Set.of();
+        }
+        OptionalDouble rolls = exactNumber(pool.get("rolls"), 1.0D);
+        OptionalDouble bonusRolls = exactNumber(pool.get("bonus_rolls"), 0.0D);
+        JsonArray entries = pool.getAsJsonArray("entries");
+        if (rolls.isEmpty() || rolls.getAsDouble() != 1.0D
+            || bonusRolls.isEmpty() || bonusRolls.getAsDouble() != 0.0D
+            || entries == null || entries.size() != 1 || !entries.get(0).isJsonObject()) {
+            return Set.of();
+        }
+
+        JsonObject entry = entries.get(0).getAsJsonObject();
+        ResourceLocation output = ResourceLocation.tryParse(string(entry, "name"));
+        String blockItemId = BuiltInRegistries.ITEM.getKey(block.asItem()).toString();
+        OptionalDouble weight = exactNumber(entry.get("weight"), 1.0D);
+        OptionalDouble quality = exactNumber(entry.get("quality"), 0.0D);
+        if (!"minecraft:item".equals(string(entry, "type"))
+            || output == null || !output.toString().equals(blockItemId)
+            || weight.isEmpty() || weight.getAsDouble() != 1.0D
+            || quality.isEmpty() || quality.getAsDouble() != 0.0D
+            || !hasNoEntries(entry, "conditions") || !hasNoEntries(entry, "functions")
+            || entry.entrySet().stream().anyMatch(field ->
+                !Set.of("type", "name", "weight", "quality", "conditions", "functions")
+                    .contains(field.getKey()))) {
+            return Set.of();
+        }
+        return Set.of(blockItemId);
+    }
+
+    private static boolean onlyOrdinaryBlockBreakConditions(JsonObject pool) {
+        JsonElement conditionValue = pool.get("conditions");
+        if (conditionValue == null) {
+            return true;
+        }
+        if (!conditionValue.isJsonArray()) {
+            return false;
+        }
+        JsonArray conditions = conditionValue.getAsJsonArray();
+        if (conditions.isEmpty()) {
+            return true;
+        }
+        if (conditions.size() != 1 || !conditions.get(0).isJsonObject()) {
+            return false;
+        }
+        JsonObject condition = conditions.get(0).getAsJsonObject();
+        return condition.size() == 1
+            && "minecraft:survives_explosion".equals(string(condition, "condition"));
+    }
+
+    private static boolean hasNoEntries(JsonObject object, String name) {
+        JsonElement value = object.get(name);
+        return value == null || value.isJsonArray() && value.getAsJsonArray().isEmpty();
     }
 
     private static Optional<ParsedTable> parseExactTable(String tableId, JsonObject root) {
@@ -410,7 +506,10 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 return Optional.empty();
             }
             JsonObject pool = poolElement.getAsJsonObject();
-            if (hasEntries(pool, "conditions") || hasEntries(pool, "functions")) {
+            if (hasEntries(pool, "functions")) {
+                return Optional.empty();
+            }
+            if (hasEntries(pool, "conditions") && !onlyOrdinaryBlockBreakConditions(pool)) {
                 return Optional.empty();
             }
             OptionalDouble rolls = exactNumber(pool.get("rolls"), 1.0D);
@@ -431,8 +530,13 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                     return Optional.empty();
                 }
                 JsonObject entry = entryElement.getAsJsonObject();
-                if (!"minecraft:item".equals(string(entry, "type"))
-                    || hasEntries(entry, "conditions") || hasEntries(entry, "functions")) {
+                if (!"minecraft:item".equals(string(entry, "type"))) {
+                    return Optional.empty();
+                }
+                if (hasEntries(entry, "functions")) {
+                    return Optional.empty();
+                }
+                if (hasEntries(entry, "conditions") && !onlyOrdinaryBlockBreakConditions(entry)) {
                     return Optional.empty();
                 }
                 OptionalDouble weight = exactNumber(entry.get("weight"), 1.0D);
@@ -519,35 +623,52 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
     }
 
     public record ParsedTable(String tableId, String sourceType, Map<String, Double> expectedUnitsByItem,
-        Set<String> unknownItems, Map<String, LootEvidence> evidenceByItem) {
+        Set<String> unknownItems, Map<String, LootEvidence> evidenceByItem,
+        Set<String> ordinaryPlayerBreakOutputs) {
         public ParsedTable(String tableId, Map<String, Double> expectedUnitsByItem) {
             this(tableId, LootTableAcquisitionAnalyzer.sourceType(ResourceLocation.parse(tableId)),
-                expectedUnitsByItem, Set.of(), Map.of());
+                expectedUnitsByItem, Set.of(), Map.of(), Set.of());
         }
 
         public ParsedTable(String tableId, String sourceType, Map<String, Double> expectedUnitsByItem) {
-            this(tableId, sourceType, expectedUnitsByItem, Set.of(), Map.of());
+            this(tableId, sourceType, expectedUnitsByItem, Set.of(), Map.of(), Set.of());
         }
 
         public ParsedTable(String tableId, String sourceType, Map<String, Double> expectedUnitsByItem,
             Set<String> unknownItems) {
-            this(tableId, sourceType, expectedUnitsByItem, unknownItems, Map.of());
+            this(tableId, sourceType, expectedUnitsByItem, unknownItems, Map.of(), Set.of());
+        }
+
+        public ParsedTable(String tableId, String sourceType, Map<String, Double> expectedUnitsByItem,
+            Set<String> unknownItems, Map<String, LootEvidence> evidenceByItem) {
+            this(tableId, sourceType, expectedUnitsByItem, unknownItems, evidenceByItem, Set.of());
         }
 
         public ParsedTable {
             expectedUnitsByItem = Map.copyOf(expectedUnitsByItem);
             unknownItems = Set.copyOf(unknownItems);
             evidenceByItem = Map.copyOf(evidenceByItem);
+            ordinaryPlayerBreakOutputs = Set.copyOf(ordinaryPlayerBreakOutputs);
             if (sourceType == null || sourceType.isBlank()) {
                 throw new IllegalArgumentException("loot source type is required");
             }
             if (expectedUnitsByItem.keySet().stream().anyMatch(unknownItems::contains)) {
                 throw new IllegalArgumentException("loot output cannot have both known and unknown yield");
             }
+            Set<String> allOutputs = new java.util.HashSet<>(expectedUnitsByItem.keySet());
+            allOutputs.addAll(unknownItems);
+            if (!allOutputs.containsAll(ordinaryPlayerBreakOutputs)) {
+                throw new IllegalArgumentException("ordinary block-break evidence must refer to a parsed output");
+            }
         }
 
         private ParsedTable withSourceType(String type) {
-            return new ParsedTable(tableId, type, expectedUnitsByItem, unknownItems, evidenceByItem);
+            return new ParsedTable(tableId, type, expectedUnitsByItem, unknownItems, evidenceByItem,
+                ordinaryPlayerBreakOutputs);
+        }
+
+        private ParsedTable withOrdinaryPlayerBreakOutputs(Set<String> outputs) {
+            return new ParsedTable(tableId, sourceType, expectedUnitsByItem, unknownItems, evidenceByItem, outputs);
         }
     }
 
@@ -561,7 +682,7 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
     }
 
     private record LootSource(String tableId, String sourceType, Double expectedUnitsPerAttempt,
-        LootEvidence evidence) {
+        LootEvidence evidence, boolean ordinaryPlayerBreakOutput) {
     }
 
     private record ItemLootSource(String itemId, LootSource source) {}

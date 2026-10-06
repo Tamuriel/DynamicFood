@@ -57,6 +57,8 @@ public final class SurvivalAcquirabilityResolver {
                 Result availability = context.resolvePath(path);
                 Map<String, String> attributes = new TreeMap<>(path.evidence().attributes());
                 attributes.put("source_availability_classification", availability.state().name());
+                attributes.put("source_availability_blocker", availability.blocker());
+                attributes.put("source_availability_stage", availability.stage());
                 attributes.put("survival_availability", availability.explanation());
                 return path.withEvidence(new AcquisitionEvidence(path.evidence().measurements(),
                     attributes, path.evidence().inputs()));
@@ -66,11 +68,29 @@ public final class SurvivalAcquirabilityResolver {
         return Map.copyOf(resolved);
     }
 
-    public record Result(SurvivalAcquirability state, String explanation) {
+    public record Result(SurvivalAcquirability state, String explanation, String blocker, String stage) {
+        public Result(SurvivalAcquirability state, String explanation) {
+            this(state, explanation, defaultBlocker(state), defaultStage(state));
+        }
+
         public Result {
             if (state == null || explanation == null || explanation.isBlank()) {
                 throw new IllegalArgumentException("survival resolution requires a state and explanation");
             }
+            blocker = blocker == null || blocker.isBlank() ? defaultBlocker(state) : blocker;
+            stage = stage == null || stage.isBlank() ? defaultStage(state) : stage;
+        }
+
+        private static String defaultBlocker(SurvivalAcquirability state) {
+            return state == SurvivalAcquirability.TRUE
+                ? "SURVIVAL_AVAILABILITY_TRUE"
+                : state == SurvivalAcquirability.FALSE
+                    ? "SURVIVAL_AVAILABILITY_FALSE"
+                    : "SURVIVAL_AVAILABILITY_UNKNOWN";
+        }
+
+        private static String defaultStage(SurvivalAcquirability state) {
+            return "AVAILABILITY_CHECK";
         }
     }
 
@@ -122,6 +142,9 @@ public final class SurvivalAcquirabilityResolver {
 
         private Result resolvePath(AcquisitionPath path) {
             Map<String, String> attributes = path.evidence().attributes();
+            if ("worldgen_feature".equals(path.sourceType())) {
+                return worldgenAvailability(path);
+            }
             if (!"recipe".equals(path.sourceType())
                 || !attributes.containsKey("recipe_operation_availability")) {
                 return explicitAvailability(path);
@@ -131,18 +154,22 @@ public final class SurvivalAcquirabilityResolver {
                 attributes.getOrDefault("recipe_operation_availability_reason",
                     "recipe operation access evidence is missing"));
             if (operation.state() == SurvivalAcquirability.FALSE) {
-                return operation;
+                return new Result(operation.state(), operation.explanation(),
+                    "RECIPE_OPERATION_NOT_AVAILABLE", "AVAILABILITY_CHECK");
             }
             List<com.jorjik.dynamicfood.graph.AcquisitionIngredient> inputs = path.evidence().inputs();
             if (inputs.isEmpty()) {
                 return new Result(SurvivalAcquirability.UNKNOWN,
-                    "active recipe source has no resolved input evidence");
+                    "active recipe source has no resolved input evidence", "RECIPE_INPUTS_UNRESOLVED",
+                    "RECURSIVE_INPUT_RESOLUTION");
             }
 
             List<String> unresolved = new java.util.ArrayList<>();
             for (var input : inputs) {
                 if (input.alternatives().isEmpty()) {
-                    unresolved.add("recipe input alternatives are unresolved");
+                    unresolved.add(input.unresolvedReason().isBlank()
+                        ? "recipe input alternatives are unresolved"
+                        : input.unresolvedReason());
                     continue;
                 }
                 List<Result> alternatives = input.alternatives().stream()
@@ -153,20 +180,66 @@ public final class SurvivalAcquirabilityResolver {
                         value.state() == SurvivalAcquirability.FALSE)) {
                         return new Result(SurvivalAcquirability.FALSE,
                             "required recipe input is unavailable through every alternative: "
-                                + input.alternatives());
+                                + input.alternatives(),
+                            "RECIPE_INPUT_ALTERNATIVES_UNAVAILABLE", "AVAILABILITY_CHECK");
                     }
                     unresolved.add("no alternative is proven survival-accessible for " + input.alternatives());
                 }
             }
             if (!unresolved.isEmpty()) {
                 return new Result(SurvivalAcquirability.UNKNOWN,
-                    "recipe source is active, but " + String.join("; ", unresolved));
+                    "recipe source is active, but " + String.join("; ", unresolved),
+                    "RECIPE_INPUTS_UNKNOWN", "RECURSIVE_INPUT_RESOLUTION");
             }
             if (operation.state() != SurvivalAcquirability.TRUE) {
-                return operation;
+                return new Result(operation.state(), operation.explanation(),
+                    operation.state() == SurvivalAcquirability.FALSE
+                        ? "RECIPE_OPERATION_NOT_AVAILABLE" : "RECIPE_OPERATION_UNKNOWN",
+                    "AVAILABILITY_CHECK");
             }
             return new Result(SurvivalAcquirability.TRUE,
-                "active server recipe source and every required input have survival evidence");
+                "active server recipe source and every required input have survival evidence",
+                "SURVIVAL_AVAILABILITY_TRUE", "AVAILABILITY_CHECK");
+        }
+
+        private Result worldgenAvailability(AcquisitionPath path) {
+            Map<String, String> attributes = path.evidence().attributes();
+            if ("FALSE".equalsIgnoreCase(attributes.get("source_availability_classification"))) {
+                return new Result(SurvivalAcquirability.FALSE,
+                    "the worldgen acquisition source is explicitly unavailable in survival",
+                    "WORLDGEN_SOURCE_UNAVAILABLE", "WORLDGEN_SOURCE_ACCESS");
+            }
+            if (!"TRUE".equals(attributes.get("active_biome_feature_source"))
+                || attributes.getOrDefault("active_dimension", "").isBlank()
+                || attributes.getOrDefault("active_dimension", "").startsWith("unknown:")) {
+                return new Result(SurvivalAcquirability.UNKNOWN,
+                    "the biome containing this feature is not proven to occur in an active server dimension",
+                    "WORLDGEN_ACTIVE_BIOME_UNKNOWN", "WORLDGEN_SOURCE_ACCESS");
+            }
+            if (!"TRUE".equals(attributes.get("configured_feature_generation_opportunity"))) {
+                return new Result(SurvivalAcquirability.UNKNOWN,
+                    "positive placement and configured-tree output evidence is unavailable",
+                    "WORLDGEN_GENERATION_OPPORTUNITY_UNKNOWN", "WORLDGEN_SOURCE_ACCESS");
+            }
+            if (!path.itemId().equals(attributes.get("worldgen_block_item_id"))) {
+                return new Result(SurvivalAcquirability.UNKNOWN,
+                    "the generated block is not proven to drop the indexed item directly",
+                    "WORLDGEN_BLOCK_ITEM_OUTPUT_MISMATCH", "WORLDGEN_EXTRACTION");
+            }
+            if (!"false".equalsIgnoreCase(attributes.get("worldgen_requires_correct_tool"))) {
+                return new Result(SurvivalAcquirability.UNKNOWN,
+                    "the generated block's correct-tool requirement is missing or requires separate tool evidence",
+                    "WORLDGEN_TOOL_REQUIREMENT_UNKNOWN", "WORLDGEN_EXTRACTION");
+            }
+            if (!"TRUE".equals(attributes.get("ordinary_player_break_output_evidence"))) {
+                return new Result(SurvivalAcquirability.UNKNOWN,
+                    "the linked block-loot table does not prove this item is emitted by an ordinary player break",
+                    "WORLDGEN_BLOCK_BREAK_OUTPUT_UNKNOWN", "WORLDGEN_EXTRACTION");
+            }
+            return new Result(SurvivalAcquirability.TRUE,
+                "active biome feature data provides a positive tree-generation opportunity and the linked "
+                    + "registered block yields this item on an ordinary no-tool player break",
+                "SURVIVAL_AVAILABILITY_TRUE", "WORLDGEN_EXTRACTION");
         }
 
         private Result explicitAvailability(AcquisitionPath path) {

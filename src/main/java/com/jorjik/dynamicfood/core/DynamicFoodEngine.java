@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import net.minecraft.core.registries.Registries;
@@ -45,6 +46,7 @@ public final class DynamicFoodEngine {
     private volatile AcquisitionAnalyzer recipeGraphAcquisitionAnalyzer;
     private volatile LootTableAcquisitionAnalyzer lootTableAcquisitionAnalyzer;
     private volatile WorldgenAcquisitionAnalyzer worldgenAcquisitionAnalyzer;
+    private volatile Map<String, Set<String>> activeWorldgenDimensionBiomes = Map.of();
     private volatile VillagerTradeAcquisitionAnalyzer villagerTradeAcquisitionAnalyzer =
         VillagerTradeAcquisitionAnalyzer.empty();
     private volatile boolean staticAcquisitionInputsReady;
@@ -466,6 +468,10 @@ public final class DynamicFoodEngine {
         staticAcquisitionInputsReady = true;
     }
 
+    public void markStaticAcquisitionInputsNotReady() {
+        staticAcquisitionInputsReady = false;
+    }
+
     public boolean staticAcquisitionInputsReady() {
         return staticAcquisitionInputsReady;
     }
@@ -533,6 +539,10 @@ public final class DynamicFoodEngine {
             com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsCap());
         worldgenAcquisitionAnalyzer = WorldgenAcquisitionAnalyzer.fromResourceManager(resources,
             lootTableAcquisitionAnalyzer);
+        if (!activeWorldgenDimensionBiomes.isEmpty()) {
+            worldgenAcquisitionAnalyzer =
+                worldgenAcquisitionAnalyzer.withActiveDimensionBiomes(activeWorldgenDimensionBiomes);
+        }
         economicResolutionCache.clear();
         acquisitionPathCache.clear();
     }
@@ -555,7 +565,28 @@ public final class DynamicFoodEngine {
         if (analyzer == null) {
             throw new IllegalArgumentException("worldgen analyzer is required");
         }
-        worldgenAcquisitionAnalyzer = analyzer;
+        worldgenAcquisitionAnalyzer = activeWorldgenDimensionBiomes.isEmpty()
+            ? analyzer : analyzer.withActiveDimensionBiomes(activeWorldgenDimensionBiomes);
+        economicResolutionCache.clear();
+        acquisitionPathCache.clear();
+    }
+
+    public synchronized void updateActiveWorldgenDimensionBiomes(Map<String, Set<String>> biomesByDimension) {
+        if (biomesByDimension == null) {
+            throw new IllegalArgumentException("active worldgen dimension evidence is required");
+        }
+        Map<String, Set<String>> immutable = new java.util.TreeMap<>();
+        biomesByDimension.forEach((dimensionId, biomeIds) -> {
+            if (dimensionId == null || dimensionId.isBlank() || biomeIds == null) {
+                throw new IllegalArgumentException("dimension IDs and biome evidence are required");
+            }
+            immutable.put(dimensionId, Set.copyOf(biomeIds));
+        });
+        activeWorldgenDimensionBiomes = Map.copyOf(immutable);
+        if (worldgenAcquisitionAnalyzer != null) {
+            worldgenAcquisitionAnalyzer =
+                worldgenAcquisitionAnalyzer.withActiveDimensionBiomes(activeWorldgenDimensionBiomes);
+        }
         economicResolutionCache.clear();
         acquisitionPathCache.clear();
     }

@@ -8,6 +8,7 @@ import com.jorjik.dynamicfood.core.EconomicGenerationPublisher;
 import com.jorjik.dynamicfood.data.DynamicFoodDataComponents;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.DoubleFunction;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.food.FoodProperties;
@@ -31,15 +32,14 @@ public final class RuntimeFoodApplier {
 
     public static void apply(ItemStack result, RuntimeProvenance provenance,
         RuntimeEconomicContext economicContext) {
-        if (result.isEmpty() || !DynamicFoodConfig.allowsRecipeType(provenance.recipeType())) {
+        if (result.isEmpty() || economicContext == null || economicContext.publishedGeneration().isEmpty()
+            || !DynamicFoodConfig.allowsRecipeType(provenance.recipeType())) {
             return;
         }
 
         FoodValue resolved = DynamicFood.ENGINE.resolve(provenance, economicContext);
-        DynamicFoodValue value = economicContext.publishedGeneration().isPresent()
-            ? DynamicFoodValue.snapshot(resolved,
-                OperationFoodSnapshot.from(provenance, resolved, 1.0D, economicContext))
-            : DynamicFoodValue.snapshot(resolved);
+        DynamicFoodValue value = DynamicFoodValue.snapshot(resolved,
+            OperationFoodSnapshot.from(provenance, resolved, 1.0D, economicContext));
         applyValue(result, value);
     }
 
@@ -63,10 +63,21 @@ public final class RuntimeFoodApplier {
         RuntimeProvenance provenance,
         RuntimeEconomicContext economicContext
     ) {
-        if (outputs.isEmpty() || !DynamicFoodConfig.allowsRecipeType(provenance.recipeType())) {
+        if (outputs.isEmpty() || economicContext == null || economicContext.publishedGeneration().isEmpty()
+            || !DynamicFoodConfig.allowsRecipeType(provenance.recipeType())) {
             return;
         }
         FoodValue operationValue = DynamicFood.ENGINE.resolve(provenance, economicContext);
+        applyAllocatedOperation(outputs, provenance, operationValue,
+            share -> OperationFoodSnapshot.from(provenance, operationValue, share, economicContext));
+    }
+
+    private static void applyAllocatedOperation(
+        List<OutputValueAllocator.OutputTarget<ItemStack>> outputs,
+        RuntimeProvenance provenance,
+        FoodValue operationValue,
+        DoubleFunction<OperationFoodSnapshot> snapshotFactory
+    ) {
         List<OutputValueAllocator.AllocatedOutput<ItemStack>> allocated =
             OutputValueAllocator.allocate(operationValue, outputs);
         double totalWeight = outputs.stream().mapToDouble(target -> target.allocationWeight() == null
@@ -86,7 +97,7 @@ public final class RuntimeFoodApplier {
                 operationValue.components()
             );
             applyValue(target.output(), DynamicFoodValue.snapshot(outputValue,
-                OperationFoodSnapshot.from(provenance, operationValue, share, economicContext)));
+                snapshotFactory.apply(share)));
         }
     }
 
@@ -107,7 +118,9 @@ public final class RuntimeFoodApplier {
     }
 
     public static void applyOperation(RecipeOperation operation, RuntimeEconomicContext economicContext) {
-        if (operation.outputs().isEmpty() || !DynamicFoodConfig.allowsRecipeType(operation.recipeType())) {
+        if (operation.outputs().isEmpty() || economicContext == null
+            || economicContext.publishedGeneration().isEmpty()
+            || !DynamicFoodConfig.allowsRecipeType(operation.recipeType())) {
             return;
         }
         RecipeOperation capturedOperation = operation.withRuntimeEconomicContext(economicContext);
@@ -135,26 +148,8 @@ public final class RuntimeFoodApplier {
         int outputCount = OutputValueAllocator.totalFoodOutputCount(targets);
         RuntimeProvenance provenance = RuntimeProvenance.fromOperation(capturedOperation, outputCount, inputs);
         FoodValue operationValue = DynamicFood.ENGINE.resolve(provenance, economicContext);
-        List<OutputValueAllocator.AllocatedOutput<ItemStack>> allocated = OutputValueAllocator.allocate(operationValue, targets);
-        double totalWeight = targets.stream().mapToDouble(target -> target.allocationWeight() == null
-            ? target.quantity() : target.allocationWeight()).sum();
-        for (OutputValueAllocator.AllocatedOutput<ItemStack> allocation : allocated) {
-            OutputValueAllocator.OutputTarget<ItemStack> target = allocation.target();
-            double weight = target.allocationWeight() == null ? target.quantity() : target.allocationWeight();
-            double share = weight / totalWeight;
-            FoodValue outputValue = new FoodValue(
-                allocation.nutritionPerUnit(),
-                (int) Math.ceil(allocation.nutritionPerUnit()),
-                allocation.saturationPerUnit(),
-                allocation.saturationPerUnit(),
-                operationValue.difficulty(),
-                capturedOperation.recipeId(),
-                outputCount,
-                operationValue.components()
-            );
-            applyValue(target.output(), DynamicFoodValue.snapshot(outputValue,
-                OperationFoodSnapshot.from(capturedOperation, operationValue, share)));
-        }
+        applyAllocatedOperation(targets, provenance, operationValue,
+            share -> OperationFoodSnapshot.from(capturedOperation, operationValue, share));
     }
 
     private static IngredientContribution fluidContribution(FluidStack stack) {
@@ -165,10 +160,21 @@ public final class RuntimeFoodApplier {
     }
 
     public static ItemStack decorateCandidate(ItemStack result, RuntimeProvenance provenance) {
+        return decorateCandidate(result, provenance,
+            RuntimeEconomicContext.capture(DynamicFood.ECONOMIC_GENERATIONS));
+    }
+
+    public static ItemStack decorateCandidate(ItemStack result, RuntimeProvenance provenance,
+        RuntimeEconomicContext economicContext) {
         if (result.isEmpty() || !DynamicFoodConfig.allowsRecipeType(provenance.recipeType())) {
             return result;
         }
-        applyValue(result, DynamicFoodValue.snapshot(DynamicFood.ENGINE.resolve(provenance)));
+        if (economicContext == null || economicContext.publishedGeneration().isEmpty()) {
+            return result;
+        }
+        FoodValue resolved = DynamicFood.ENGINE.resolve(provenance, economicContext);
+        applyValue(result, DynamicFoodValue.snapshot(resolved,
+            OperationFoodSnapshot.from(provenance, resolved, 1.0D, economicContext)));
         return result;
     }
 
@@ -187,6 +193,7 @@ public final class RuntimeFoodApplier {
             itemId(result), "runtime:smelting_unresolved", "minecraft:smelting", result.getCount(), List.of());
     }
 
+    @Deprecated(forRemoval = false)
     public static List<IngredientContribution> contributions(List<ItemStack> inputs) {
         return contributions(inputs, null);
     }
@@ -202,6 +209,7 @@ public final class RuntimeFoodApplier {
         return List.copyOf(contributions);
     }
 
+    @Deprecated(forRemoval = false)
     public static IngredientContribution contribution(ItemStack stack, int consumedCount) {
         return contribution(stack, consumedCount, null);
     }
@@ -210,7 +218,9 @@ public final class RuntimeFoodApplier {
         RuntimeEconomicContext economicContext) {
         DynamicFoodValue inherited = stack.get(DynamicFoodDataComponents.VALUE.get());
         if (inherited != null) {
-            return inherited.asIngredientContribution(itemId(stack), consumedCount);
+            if (economicContext == null || inherited.belongsTo(economicContext)) {
+                return inherited.asIngredientContribution(itemId(stack), consumedCount);
+            }
         }
 
         IngredientContribution resolved = ItemStackFoodResolver.resolve(stack, economicContext);

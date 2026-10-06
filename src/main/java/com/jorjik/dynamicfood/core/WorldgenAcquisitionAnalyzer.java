@@ -1,5 +1,6 @@
 package com.jorjik.dynamicfood.core;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -33,7 +34,7 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
         LootTableAcquisitionAnalyzer lootAnalyzer) {
         Map<String, JsonObject> jsonResources = new HashMap<>();
         for (String directory : List.of("worldgen/biome", "worldgen/placed_feature",
-            "worldgen/configured_feature", "worldgen/dimension",
+            "worldgen/configured_feature", "dimension",
             "worldgen/multi_noise_biome_source_parameter_list")) {
             resourceManager.listResources(directory, id -> id.getPath().endsWith(".json"))
                 .entrySet().stream().sorted(Map.Entry.comparingByKey())
@@ -45,6 +46,33 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
 
     public static WorldgenAcquisitionAnalyzer fromJsonResources(Map<String, JsonObject> jsonResources) {
         return fromBlockSources(discoverBlockSources(jsonResources), null);
+    }
+
+    public WorldgenAcquisitionAnalyzer withActiveDimensionBiomes(Map<String, Set<String>> biomesByDimension) {
+        if (biomesByDimension == null) {
+            throw new IllegalArgumentException("active worldgen dimension evidence is required");
+        }
+        Map<String, List<WorldgenSource>> updated = new HashMap<>();
+        sourcesByItem.forEach((itemId, sources) -> updated.put(itemId, sources.stream().map(source -> {
+            Set<String> dimensions = new TreeSet<>();
+            biomesByDimension.forEach((dimensionId, biomeIds) -> {
+                if (biomeIds.contains(source.biomeId())) {
+                    dimensions.add(dimensionId);
+                }
+            });
+            Map<String, String> attributes = new HashMap<>(source.attributes());
+            attributes.put("dimension", dimensions.isEmpty()
+                ? "unknown: biome is not present in the active server dimension biome sources"
+                : String.join(",", dimensions));
+            attributes.put("active_dimension", dimensions.isEmpty()
+                ? "unknown: biome is not present in the active server dimension biome sources"
+                : String.join(",", dimensions));
+            attributes.put("active_biome_feature_source", dimensions.isEmpty() ? "UNKNOWN" : "TRUE");
+            return new WorldgenSource(source.sourceId(), source.biomeId(), source.placedFeatureId(),
+                source.blockId(), source.blockItemId(), source.requiresCorrectTool(), source.lootTableId(),
+                source.measurements(), Map.copyOf(attributes), source.extractionPath());
+        }).toList()));
+        return new WorldgenAcquisitionAnalyzer(updated);
     }
 
     static WorldgenAcquisitionAnalyzer fromBlockSources(
@@ -65,7 +93,8 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
             }
             String itemId = BuiltInRegistries.ITEM.getKey(item).toString();
             extractionByBlock.put(blockId,
-                new BlockExtraction(itemId, block.getLootTable().location().toString()));
+                new BlockExtraction(itemId, block.getLootTable().location().toString(),
+                    block.defaultBlockState().requiresCorrectToolForDrops()));
         });
         return fromResolvedBlockSources(discovered, extractionByBlock, lootAnalyzer);
     }
@@ -87,14 +116,16 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 sources.forEach(source -> indexed.computeIfAbsent(blockExtraction.blockItemId(),
                     ignored -> new ArrayList<>())
                     .add(new WorldgenSource(source.sourceId(), source.biomeId(), source.placedFeatureId(), blockId,
-                        lootTableId, source.measurements(), source.attributes(), null)));
+                        blockExtraction.blockItemId(), blockExtraction.requiresCorrectTool(), lootTableId,
+                        source.measurements(), source.attributes(), null)));
                 return;
             }
             for (WorldgenBlockSource source : sources) {
                 for (AcquisitionPath extractionPath : extractionPaths) {
                     indexed.computeIfAbsent(extractionPath.itemId(), ignored -> new ArrayList<>())
                         .add(new WorldgenSource(source.sourceId(), source.biomeId(), source.placedFeatureId(),
-                            blockId, lootTableId, source.measurements(), source.attributes(), extractionPath));
+                            blockId, blockExtraction.blockItemId(), blockExtraction.requiresCorrectTool(),
+                            lootTableId, source.measurements(), source.attributes(), extractionPath));
                 }
             }
         });
@@ -104,14 +135,18 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
         return new WorldgenAcquisitionAnalyzer(frozen);
     }
 
-    record BlockExtraction(String blockItemId, String lootTableId) {}
+    record BlockExtraction(String blockItemId, String lootTableId, Boolean requiresCorrectTool) {
+        BlockExtraction(String blockItemId, String lootTableId) {
+            this(blockItemId, lootTableId, null);
+        }
+    }
 
     static WorldgenAcquisitionAnalyzer fromItemSources(
         Map<String, List<WorldgenBlockSource>> sourcesByItem) {
         Map<String, List<WorldgenSource>> indexed = new HashMap<>();
         sourcesByItem.forEach((itemId, sources) -> indexed.put(itemId, sources.stream()
             .map(source -> new WorldgenSource(source.sourceId(), source.biomeId(), source.placedFeatureId(),
-                itemId, null, source.measurements(), source.attributes(), null))
+                itemId, null, null, null, source.measurements(), source.attributes(), null))
             .toList()));
         return new WorldgenAcquisitionAnalyzer(indexed);
     }
@@ -141,19 +176,28 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
                     collectKnownReferences(placedFeature.get("feature"), configuredFeatures.keySet(),
                         configuredReferences);
                 }
+                WorldgenFeatureClosure featureClosure = configuredFeatureClosure(
+                    configuredReferences, configuredFeatures, placedFeatures);
+                Set<String> referencedConfiguredFeatures = new TreeSet<>(featureClosure.configuredFeatureIds());
                 Set<String> outputBlocks = new TreeSet<>();
-                configuredReferences.forEach(id -> outputBlocks.addAll(configuredBlocks.getOrDefault(id, Set.of())));
+                referencedConfiguredFeatures.forEach(id ->
+                    outputBlocks.addAll(configuredBlocks.getOrDefault(id, Set.of())));
                 WorldgenFeatureEvidence placedEvidence = placedFeatureEvidence(placedFeature);
                 for (String blockId : outputBlocks) {
                     String sourceId = biome.getKey() + "/" + placedId;
+                    boolean positiveTreeOpportunity = hasPositiveTreeGenerationOpportunity(
+                        blockId, placedFeature, configuredReferences, configuredFeatures, placedFeatures);
                     indexed.computeIfAbsent(blockId, ignored -> new ArrayList<>())
                         .add(new WorldgenBlockSource(sourceId, biome.getKey(), placedId,
-                            mergeMeasurements(placedEvidence.measurements(), configuredReferences,
+                            mergeMeasurements(placedEvidence.measurements(), referencedConfiguredFeatures,
                                 configuredEvidence),
                             mergeAttributes(Map.of(
                                 "biome_restriction", biome.getKey(),
                                 "placed_feature", placedId,
-                                "configured_features", String.join(",", configuredReferences),
+                                "configured_features", String.join(",", referencedConfiguredFeatures),
+                                "nested_placed_features", String.join(",", featureClosure.nestedPlacedFeatureIds()),
+                                "configured_feature_generation_opportunity",
+                                    positiveTreeOpportunity ? "TRUE" : "UNKNOWN",
                                 "dimension", dimensionsByBiome.getOrDefault(biome.getKey(), Set.of()).isEmpty()
                                     ? "unknown: biome-to-dimension relation is not declared by loaded dimension data"
                                     : String.join(",", dimensionsByBiome.get(biome.getKey()))
@@ -165,6 +209,248 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
         indexed.forEach((blockId, sources) -> frozen.put(blockId, sources.stream()
             .distinct().sorted(Comparator.comparing(WorldgenBlockSource::sourceId)).toList()));
         return Map.copyOf(frozen);
+    }
+
+    private static WorldgenFeatureClosure configuredFeatureClosure(Set<String> roots,
+        Map<String, JsonObject> configuredFeatures, Map<String, JsonObject> placedFeatures) {
+        Set<String> reachable = new TreeSet<>();
+        Set<String> nestedPlacedFeatures = new TreeSet<>();
+        List<String> pending = new ArrayList<>(roots);
+        while (!pending.isEmpty()) {
+            String id = pending.removeFirst();
+            if (!reachable.add(id)) {
+                continue;
+            }
+            JsonObject feature = configuredFeatures.get(id);
+            if (feature == null) {
+                continue;
+            }
+            Set<String> references = new TreeSet<>();
+            collectConfiguredFeatureReferences(feature.get("config"),
+                unionIds(configuredFeatures.keySet(), placedFeatures.keySet()), references);
+            for (String reference : references) {
+                JsonObject nestedPlacedFeature = placedFeatures.get(reference);
+                if (nestedPlacedFeature != null) {
+                    if (nestedPlacedFeatures.add(reference)) {
+                        Set<String> nestedConfiguredFeatures = new TreeSet<>();
+                        collectKnownReferences(nestedPlacedFeature.get("feature"),
+                            configuredFeatures.keySet(), nestedConfiguredFeatures);
+                        pending.addAll(nestedConfiguredFeatures);
+                    }
+                } else if (configuredFeatures.containsKey(reference)) {
+                    pending.add(reference);
+                }
+            }
+        }
+        return new WorldgenFeatureClosure(List.copyOf(reachable), List.copyOf(nestedPlacedFeatures));
+    }
+
+    private static boolean hasPositiveTreeGenerationOpportunity(String blockId, JsonObject placedFeature,
+        Set<String> configuredRoots, Map<String, JsonObject> configuredFeatures,
+        Map<String, JsonObject> placedFeatures) {
+        if (!hasPositiveTreePlacement(placedFeature)) {
+            return false;
+        }
+        Set<String> knownFeatureIds = unionIds(configuredFeatures.keySet(), placedFeatures.keySet());
+        return configuredRoots.stream().anyMatch(root ->
+            hasPositiveTreeOutput(root, blockId, configuredFeatures, placedFeatures, knownFeatureIds,
+                new java.util.HashSet<>()));
+    }
+
+    private static boolean hasPositiveTreeOutput(String featureId, String blockId,
+        Map<String, JsonObject> configuredFeatures, Map<String, JsonObject> placedFeatures,
+        Set<String> knownFeatureIds, Set<String> visiting) {
+        if (!visiting.add(featureId)) {
+            return false;
+        }
+        JsonObject configured = configuredFeatures.get(featureId);
+        boolean found = false;
+        if (configured != null) {
+            String type = string(configured, "type");
+            JsonObject config = configured.getAsJsonObject("config");
+            if ("minecraft:tree".equals(type) && config != null) {
+                Set<String> trunkBlocks = new TreeSet<>();
+                collectBlockStateNames(config.get("trunk_provider"), trunkBlocks);
+                found = trunkBlocks.contains(blockId);
+            } else if ("minecraft:random_selector".equals(type) && config != null) {
+                found = hasPositiveRandomSelectorTreeOutput(config, blockId, configuredFeatures,
+                    placedFeatures, knownFeatureIds, visiting);
+            } else if ("minecraft:decorated".equals(type) && config != null) {
+                Set<String> nested = new TreeSet<>();
+                collectKnownReferences(config.get("feature"), knownFeatureIds, nested);
+                found = nested.size() == 1 && nested.stream().anyMatch(id ->
+                    hasPositiveTreeOutput(id, blockId, configuredFeatures, placedFeatures,
+                        knownFeatureIds, visiting));
+            }
+        } else {
+            JsonObject nestedPlaced = placedFeatures.get(featureId);
+            if (nestedPlaced != null && hasPositiveTreePlacement(nestedPlaced)) {
+                Set<String> nested = new TreeSet<>();
+                collectKnownReferences(nestedPlaced.get("feature"), knownFeatureIds, nested);
+                found = nested.stream().anyMatch(id ->
+                    hasPositiveTreeOutput(id, blockId, configuredFeatures, placedFeatures,
+                        knownFeatureIds, visiting));
+            }
+        }
+        visiting.remove(featureId);
+        return found;
+    }
+
+    private static boolean hasPositiveRandomSelectorTreeOutput(JsonObject config, String blockId,
+        Map<String, JsonObject> configuredFeatures, Map<String, JsonObject> placedFeatures,
+        Set<String> knownFeatureIds, Set<String> visiting) {
+        JsonArray features = config.getAsJsonArray("features");
+        if (features == null) {
+            return false;
+        }
+        double remainingChance = 1.0D;
+        for (JsonElement element : features) {
+            if (!element.isJsonObject()) {
+                return false;
+            }
+            JsonObject branch = element.getAsJsonObject();
+            OptionalDouble chance = exactNumber(branch.get("chance"));
+            if (chance.isEmpty() || chance.getAsDouble() < 0.0D || chance.getAsDouble() > 1.0D) {
+                return false;
+            }
+            if (chance.getAsDouble() > 0.0D && remainingChance > 0.0D) {
+                Set<String> branchFeatures = new TreeSet<>();
+                collectKnownReferences(branch.get("feature"), knownFeatureIds, branchFeatures);
+                if (branchFeatures.stream().anyMatch(id ->
+                    hasPositiveTreeOutput(id, blockId, configuredFeatures, placedFeatures,
+                        knownFeatureIds, visiting))) {
+                    return true;
+                }
+            }
+            remainingChance *= 1.0D - chance.getAsDouble();
+        }
+        if (remainingChance <= 0.0D) {
+            return false;
+        }
+        Set<String> defaultFeatures = new TreeSet<>();
+        collectKnownReferences(config.get("default"), knownFeatureIds, defaultFeatures);
+        return defaultFeatures.stream().anyMatch(id ->
+            hasPositiveTreeOutput(id, blockId, configuredFeatures, placedFeatures,
+                knownFeatureIds, visiting));
+    }
+
+    private static boolean hasPositiveTreePlacement(JsonObject placedFeature) {
+        if (placedFeature == null || !placedFeature.has("placement")
+            || !placedFeature.get("placement").isJsonArray()) {
+            return false;
+        }
+        boolean positiveCount = false;
+        for (JsonElement element : placedFeature.getAsJsonArray("placement")) {
+            if (!element.isJsonObject()) {
+                return false;
+            }
+            JsonObject modifier = element.getAsJsonObject();
+            String type = string(modifier, "type");
+            if ("minecraft:count".equals(type)) {
+                Optional<Boolean> positive = hasPositiveCount(modifier.get("count"));
+                if (positive.isEmpty() || !positive.get()) {
+                    return false;
+                }
+                positiveCount = true;
+            } else if ("minecraft:in_square".equals(type) || "minecraft:biome".equals(type)) {
+                continue;
+            } else if ("minecraft:surface_water_depth_filter".equals(type)) {
+                OptionalDouble depth = exactNumber(modifier.get("max_water_depth"));
+                if (depth.isEmpty() || depth.getAsDouble() < 0.0D) {
+                    return false;
+                }
+            } else if ("minecraft:heightmap".equals(type)) {
+                String heightmap = string(modifier, "heightmap");
+                if (heightmap == null || heightmap.isBlank()) {
+                    return false;
+                }
+            } else if ("minecraft:block_predicate_filter".equals(type)) {
+                JsonObject predicate = modifier.getAsJsonObject("predicate");
+                JsonObject state = predicate == null ? null : predicate.getAsJsonObject("state");
+                ResourceLocation stateBlock = state == null ? null
+                    : ResourceLocation.tryParse(string(state, "Name"));
+                if (predicate == null || !"minecraft:would_survive".equals(string(predicate, "type"))
+                    || stateBlock == null) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        return positiveCount;
+    }
+
+    private static Optional<Boolean> hasPositiveCount(JsonElement count) {
+        OptionalDouble literal = exactNumber(count);
+        if (literal.isPresent()) {
+            return literal.getAsDouble() < 0.0D ? Optional.empty()
+                : Optional.of(literal.getAsDouble() > 0.0D);
+        }
+        if (count == null || !count.isJsonObject()) {
+            return Optional.empty();
+        }
+        JsonObject weighted = count.getAsJsonObject();
+        if (!"minecraft:weighted_list".equals(string(weighted, "type"))
+            || weighted.entrySet().stream().anyMatch(entry ->
+                !Set.of("type", "distribution").contains(entry.getKey()))) {
+            return Optional.empty();
+        }
+        JsonArray distribution = weighted.getAsJsonArray("distribution");
+        if (distribution == null || distribution.isEmpty()) {
+            return Optional.empty();
+        }
+        boolean positiveValue = false;
+        for (JsonElement element : distribution) {
+            if (!element.isJsonObject()) {
+                return Optional.empty();
+            }
+            JsonObject outcome = element.getAsJsonObject();
+            OptionalDouble value = exactNumber(outcome.get("data"));
+            OptionalDouble weight = exactNumber(outcome.get("weight"));
+            if (value.isEmpty() || value.getAsDouble() < 0.0D
+                || weight.isEmpty() || weight.getAsDouble() <= 0.0D
+                || outcome.entrySet().stream().anyMatch(entry ->
+                    !Set.of("data", "weight").contains(entry.getKey()))) {
+                return Optional.empty();
+            }
+            positiveValue |= value.getAsDouble() > 0.0D;
+        }
+        return Optional.of(positiveValue);
+    }
+
+    private static Set<String> unionIds(Set<String> first, Set<String> second) {
+        Set<String> ids = new TreeSet<>(first);
+        ids.addAll(second);
+        return ids;
+    }
+
+    private static void collectConfiguredFeatureReferences(JsonElement element, Set<String> knownIds,
+        Set<String> found) {
+        if (element == null) {
+            return;
+        }
+        if (element.isJsonObject()) {
+            element.getAsJsonObject().entrySet().forEach(entry -> {
+                String key = entry.getKey();
+                JsonElement value = entry.getValue();
+                if (key.equals("feature") || key.equals("default") || key.startsWith("feature_")) {
+                    collectKnownReferences(value, knownIds, found);
+                } else if (key.equals("features") && value.isJsonArray()) {
+                    value.getAsJsonArray().forEach(child -> {
+                        if (child.isJsonPrimitive() && child.getAsJsonPrimitive().isString()) {
+                            collectKnownReferences(child, knownIds, found);
+                        } else {
+                            collectConfiguredFeatureReferences(child, knownIds, found);
+                        }
+                    });
+                } else {
+                    collectConfiguredFeatureReferences(value, knownIds, found);
+                }
+            });
+        } else if (element.isJsonArray()) {
+            element.getAsJsonArray().forEach(child ->
+                collectConfiguredFeatureReferences(child, knownIds, found));
+        }
     }
 
     @Override
@@ -204,20 +490,18 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
                     "mining tool and durability requirements are not represented by feature data")),
                 Map.entry("intermediate_steps", EconomicFactor.notApplicable(
                     "worldgen placement has no recursive recipe steps")),
-                Map.entry("equipment_availability", EconomicFactor.unknown(
-                    "required mining equipment is not represented by feature data")),
+                Map.entry("equipment_availability", equipmentAvailability(source.requiresCorrectTool())),
                 Map.entry("reliability", EconomicFactor.unknown(
                     "runtime generation conditions are not evaluated")
                 ));
             Map<String, EconomicFactor> costFactors = Map.ofEntries(
                 Map.entry("time_cost", EconomicFactor.unknown(
-                    "worldgen data does not expose travel or mining time")),
+                    "worldgen evidence does not measure block-break extraction duration in ticks")),
                 Map.entry("prerequisite_cost", EconomicFactor.notApplicable(
                     "worldgen feature definitions contain no player prerequisite operation")),
                 Map.entry("progression_cost", EconomicFactor.notApplicable(
                     "worldgen data has no progression-gated generation mechanic")),
-                Map.entry("equipment_cost", EconomicFactor.unknown(
-                    "mining equipment and replacement cost are not represented by feature data")),
+                Map.entry("equipment_cost", equipmentCost(source.requiresCorrectTool())),
                 Map.entry("danger_cost", EconomicFactor.unknown(
                     "biome and dimension evidence does not determine player danger")),
                 Map.entry("transport_cost", EconomicFactor.unknown(
@@ -271,6 +555,19 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
                         "block-loot table quantity per block break"));
                 attributes.put("extraction_operation", "break the generated block and evaluate its block loot table");
                 attributes.put("extraction_source_path", source.extractionPath().sourceId());
+                attributes.put("ordinary_player_break_output_evidence",
+                    extractionAttributes.getOrDefault("ordinary_player_break_output_evidence", "UNKNOWN"));
+                String breakEvidenceReason =
+                    extractionAttributes.get("ordinary_player_break_output_reason");
+                if (breakEvidenceReason != null) {
+                    attributes.put("ordinary_player_break_output_reason", breakEvidenceReason);
+                }
+            }
+            if (source.blockItemId() != null) {
+                attributes.put("worldgen_block_item_id", source.blockItemId());
+            }
+            if (source.requiresCorrectTool() != null) {
+                attributes.put("worldgen_requires_correct_tool", source.requiresCorrectTool().toString());
             }
             attributes.put("survival_availability",
                 "unknown: generated block discovery does not prove active-world or player access");
@@ -311,7 +608,7 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
 
     private static Map<String, Set<String>> discoverBiomeDimensions(Map<String, JsonObject> resources,
         Set<String> biomeIds) {
-        Map<String, JsonObject> dimensions = resourcesInDirectory(resources, "worldgen/dimension");
+        Map<String, JsonObject> dimensions = resourcesInDirectory(resources, "dimension");
         Map<String, JsonObject> parameterLists =
             resourcesInDirectory(resources, "worldgen/multi_noise_biome_source_parameter_list");
         Map<String, Set<String>> result = new HashMap<>();
@@ -335,6 +632,26 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
         Map<String, Set<String>> frozen = new HashMap<>();
         result.forEach((biome, ids) -> frozen.put(biome, Set.copyOf(ids)));
         return Map.copyOf(frozen);
+    }
+
+    private static EconomicFactor equipmentAvailability(Boolean requiresCorrectTool) {
+        if (Boolean.FALSE.equals(requiresCorrectTool)) {
+            return EconomicFactor.notApplicable(
+                "registered block state proves that no correct tool is required for drops");
+        }
+        return EconomicFactor.unknown(Boolean.TRUE.equals(requiresCorrectTool)
+            ? "registered block requires a correct tool, but player access to that equipment is unresolved"
+            : "registered block correct-tool requirement is not exposed");
+    }
+
+    private static EconomicFactor equipmentCost(Boolean requiresCorrectTool) {
+        if (Boolean.FALSE.equals(requiresCorrectTool)) {
+            return EconomicFactor.notApplicable(
+                "registered block state proves this extraction path requires no correct tool");
+        }
+        return EconomicFactor.unknown(Boolean.TRUE.equals(requiresCorrectTool)
+            ? "registered block requires a correct tool, but its acquisition and replacement cost are unresolved"
+            : "registered block correct-tool requirement is not exposed, so equipment cost applicability is unresolved");
     }
 
     private static List<Integer> supportedHorizons() {
@@ -502,8 +819,12 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
     }
 
     private record WorldgenSource(String sourceId, String biomeId, String placedFeatureId, String blockId,
-        String lootTableId, Map<String, AcquisitionMeasurement> measurements, Map<String, String> attributes,
+        String blockItemId, Boolean requiresCorrectTool, String lootTableId,
+        Map<String, AcquisitionMeasurement> measurements, Map<String, String> attributes,
         AcquisitionPath extractionPath) {}
+
+    private record WorldgenFeatureClosure(List<String> configuredFeatureIds,
+        List<String> nestedPlacedFeatureIds) {}
 
     private record WorldgenFeatureEvidence(Map<String, AcquisitionMeasurement> measurements,
         Map<String, String> attributes) {}

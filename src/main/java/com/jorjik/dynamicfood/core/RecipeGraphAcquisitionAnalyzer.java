@@ -136,6 +136,9 @@ public final class RecipeGraphAcquisitionAnalyzer implements AcquisitionAnalyzer
                 attributes.put("input_" + index + "_alternatives", String.join("|", input.alternatives()));
                 attributes.put("input_" + index + "_quantity", Integer.toString(input.count()));
                 attributes.put("input_" + index + "_use", input.inputUse().name().toLowerCase(java.util.Locale.ROOT));
+                if (!input.unresolvedReason().isBlank()) {
+                    attributes.put("input_" + index + "_unresolved_reason", input.unresolvedReason());
+                }
             }
             paths.add(new AcquisitionPath(itemId, "recipe", recipe.recipeId(), 1.0D,
                 null, null, true, false, recipeFeasibilityFactors(recipe), costsByHorizon,

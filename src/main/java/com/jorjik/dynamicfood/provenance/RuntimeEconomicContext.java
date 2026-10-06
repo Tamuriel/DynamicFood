@@ -24,4 +24,8 @@ public record RuntimeEconomicContext(Optional<PublishedEconomicGeneration> publi
     public Optional<String> economicContentSignature() {
         return publishedGeneration.map(PublishedEconomicGeneration::economicContentSignature);
     }
+
+    public Optional<String> calibrationContentSignature() {
+        return publishedGeneration.map(generation -> generation.calibrationSnapshot().signature());
+    }
 }

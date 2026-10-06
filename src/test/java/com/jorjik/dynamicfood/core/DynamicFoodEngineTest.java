@@ -1692,6 +1692,57 @@ class DynamicFoodEngineTest {
     }
 
     @Test
+    void calibratedDynamicValuePersistsItsGenerationReference() {
+        FoodValue computed = FoodValueResolver.compute(
+            List.of(IngredientContribution.of("test:food", 2.25D, 0.4D, 1, true)),
+            1, 0.0D, 0.0D, "test:calibrated"
+        );
+        PublishedEconomicGeneration published = testGeneration(12L);
+        RuntimeEconomicContext context = new RuntimeEconomicContext(Optional.of(published));
+        DynamicFoodValue original = DynamicFoodValue.snapshotCalibrated(computed, context);
+
+        assertEquals(DynamicFoodValue.Origin.STATIC_CALIBRATED, original.origin());
+        assertTrue(original.belongsTo(context));
+        assertTrue(!original.belongsTo(new RuntimeEconomicContext(Optional.of(testGeneration(13L)))));
+        CalibrationSnapshot changedCalibration = published.calibrationSnapshot()
+            .withConfigurationSignature("calibration-only reload");
+        RuntimeEconomicContext recalibratedContext = new RuntimeEconomicContext(Optional.of(
+            new PublishedEconomicGeneration(published.economicSnapshot(), changedCalibration)));
+        assertEquals(context.generation(), recalibratedContext.generation());
+        assertEquals(context.economicContentSignature(), recalibratedContext.economicContentSignature());
+        assertTrue(!original.belongsTo(recalibratedContext),
+            "a calibration-only publication must invalidate values bound to the previous published pair");
+        RuntimeProvenance provenance = new RuntimeProvenance("test:food", "test:operation",
+            "minecraft:crafting", 1, List.of());
+        DynamicFoodValue operationValue = DynamicFoodValue.snapshot(computed,
+            OperationFoodSnapshot.from(provenance, computed, 1.0D, context));
+        assertTrue(operationValue.belongsTo(context));
+        assertTrue(!operationValue.belongsTo(recalibratedContext),
+            "runtime operation snapshots must identify the calibration values consumed by the operation");
+        var operationEncoded = DynamicFoodValue.CODEC.encodeStart(JsonOps.INSTANCE, operationValue)
+            .result().orElseThrow();
+        assertEquals(operationValue,
+            DynamicFoodValue.CODEC.parse(JsonOps.INSTANCE, operationEncoded).result().orElseThrow());
+        ByteBuf operationBuffer = Unpooled.buffer();
+        try {
+            DynamicFoodValue.STREAM_CODEC.encode(operationBuffer, operationValue);
+            assertEquals(operationValue, DynamicFoodValue.STREAM_CODEC.decode(operationBuffer));
+        } finally {
+            operationBuffer.release();
+        }
+        var encoded = DynamicFoodValue.CODEC.encodeStart(JsonOps.INSTANCE, original).result().orElseThrow();
+        assertEquals(original, DynamicFoodValue.CODEC.parse(JsonOps.INSTANCE, encoded).result().orElseThrow());
+
+        ByteBuf buffer = Unpooled.buffer();
+        try {
+            DynamicFoodValue.STREAM_CODEC.encode(buffer, original);
+            assertEquals(original, DynamicFoodValue.STREAM_CODEC.decode(buffer));
+        } finally {
+            buffer.release();
+        }
+    }
+
+    @Test
     void dynamicValueNetworkStreamCodecRoundTripsSnapshotAndProvenance() {
         DynamicFoodValue original = new DynamicFoodValue(2.25D, 3, 0.753D, 0.75F,
             2.0D, "test:network_recipe", 2,

@@ -87,39 +87,73 @@ class AcquisitionAnalyzersTest {
 
     @Test
     void worldgenDiscoveryFollowsBiomePlacedAndConfiguredFeaturesWithoutNamespaceGuessing() {
-        Map<String, JsonObject> resources = Map.of(
-            "testmod:worldgen/biome/forest.json", json("""
-                {"features":[["testmod:ore_patch"]]}
-                """),
-            "testmod:worldgen/placed_feature/ore_patch.json", json("""
-                {"feature":"testmod:ore_config","placement":[
-                  {"type":"minecraft:count","count":{"type":"minecraft:constant","value":4}},
-                  {"type":"minecraft:rarity_filter","chance":20},
-                  {"type":"minecraft:height_range","height":{"type":"minecraft:uniform","min_inclusive":{"absolute":0},"max_inclusive":{"absolute":64}}}
-                ]}
-                """),
-            "testmod:worldgen/configured_feature/ore_config.json", json("""
-                {"feature":"minecraft:ore","config":{"size":8,"states":[
-                  {"state":{"Name":"minecraft:coal_ore"}},
-                  {"state":{"Name":"minecraft:deepslate_coal_ore"}}
-                ]}}
-                """),
-            "testmod:worldgen/placed_feature/unreferenced.json", json("""
-                {"feature":"testmod:orphan_config","placement":[]}
-                """),
-            "testmod:worldgen/configured_feature/orphan_config.json", json("""
-                {"feature":"minecraft:ore","config":{"state":{"Name":"minecraft:diamond_ore"}}}
-                """),
-            "testmod:worldgen/dimension/my_dimension.json", json("""
-                {"generator":{"type":"minecraft:noise","biome_source":{
-                  "type":"minecraft:fixed","biome":"testmod:forest"
-                }}}
-                """));
+        Map<String, JsonObject> resources = Map.ofEntries(
+            Map.entry("testmod:worldgen/biome/forest.json", json("""
+                    {"features":[["testmod:ore_patch"],["testmod:trees"]]}
+                    """)),
+            Map.entry("testmod:worldgen/placed_feature/ore_patch.json", json("""
+                    {"feature":"testmod:ore_config","placement":[
+                      {"type":"minecraft:count","count":{"type":"minecraft:constant","value":4}},
+                      {"type":"minecraft:rarity_filter","chance":20},
+                      {"type":"minecraft:height_range","height":{"type":"minecraft:uniform","min_inclusive":{"absolute":0},"max_inclusive":{"absolute":64}}}
+                    ]}
+                    """)),
+            Map.entry("testmod:worldgen/configured_feature/ore_config.json", json("""
+                    {"feature":"minecraft:ore","config":{"size":8,"states":[
+                      {"state":{"Name":"minecraft:coal_ore"}},
+                      {"state":{"Name":"minecraft:deepslate_coal_ore"}}
+                    ]}}
+                    """)),
+            Map.entry("testmod:worldgen/placed_feature/trees.json", json("""
+                    {"feature":"testmod:tree_selector","placement":[]}
+                    """)),
+            Map.entry("testmod:worldgen/configured_feature/tree_selector.json", json("""
+                    {"feature":"minecraft:random_selector","config":{
+                      "default":"testmod:tree_branch_checked",
+                      "features":[{"chance":0.8,"feature":"testmod:tree_checked"}]
+                    }}
+                    """)),
+            Map.entry("testmod:worldgen/placed_feature/tree_branch_checked.json", json("""
+                    {"feature":"testmod:tree_branch","placement":[]}
+                    """)),
+            Map.entry("testmod:worldgen/placed_feature/tree_checked.json", json("""
+                    {"feature":"testmod:tree_nested","placement":[]}
+                    """)),
+            Map.entry("testmod:worldgen/configured_feature/tree_branch.json", json("""
+                    {"feature":"minecraft:decorated","config":{"feature":"testmod:tree_trunk"}}
+                    """)),
+            Map.entry("testmod:worldgen/configured_feature/tree_nested.json", json("""
+                    {"feature":"minecraft:tree","config":{"trunk_provider":{
+                      "type":"minecraft:simple_state_provider",
+                      "state":{"Name":"minecraft:oak_log"}
+                    }}}
+                    """)),
+            Map.entry("testmod:worldgen/configured_feature/tree_trunk.json", json("""
+                    {"feature":"minecraft:tree","config":{"trunk_provider":{
+                      "type":"minecraft:simple_state_provider",
+                      "state":{"Name":"minecraft:birch_log"}
+                    }}}
+                    """)),
+            Map.entry("testmod:worldgen/placed_feature/unreferenced.json", json("""
+                    {"feature":"testmod:orphan_config","placement":[]}
+                    """)),
+            Map.entry("testmod:worldgen/configured_feature/orphan_config.json", json("""
+                    {"feature":"minecraft:ore","config":{"state":{"Name":"minecraft:diamond_ore"}}}
+                    """)),
+            Map.entry("testmod:dimension/my_dimension.json", json("""
+                    {"generator":{"type":"minecraft:noise","biome_source":{
+                      "type":"minecraft:fixed","biome":"testmod:forest"
+                    }}}
+                    """)));
         Map<String, java.util.List<WorldgenAcquisitionAnalyzer.WorldgenBlockSource>> discovered =
             WorldgenAcquisitionAnalyzer.discoverBlockSources(resources);
 
         assertTrue(discovered.containsKey("minecraft:coal_ore"));
         assertTrue(discovered.containsKey("minecraft:deepslate_coal_ore"));
+        assertTrue(discovered.containsKey("minecraft:oak_log"),
+            "nested random-selector configured features must expose their generated block states");
+        assertTrue(discovered.containsKey("minecraft:birch_log"),
+            "decorated configured-feature references must be followed to generated block states");
         assertTrue(!discovered.containsKey("minecraft:diamond_ore"),
             "configured features not referenced by an enabled biome must not be asserted as obtainable");
         assertTrue(discovered.get("minecraft:coal_ore").size() == 1);
@@ -132,6 +166,9 @@ class AcquisitionAnalyzersTest {
             .get("configured:testmod:ore_config:configured_cluster_size").value());
         assertEquals("testmod:forest", source.attributes().get("biome_restriction"));
         assertEquals("testmod:my_dimension", source.attributes().get("dimension"));
+        var treeSource = discovered.get("minecraft:oak_log").getFirst();
+        assertTrue(treeSource.attributes().get("nested_placed_features").contains("testmod:tree_checked"));
+        assertTrue(treeSource.attributes().get("configured_features").contains("testmod:tree_nested"));
 
     }
 
@@ -188,6 +225,11 @@ class AcquisitionAnalyzersTest {
         assertEquals("item per block-break loot invocation",
             stone.evidence().attributes().get("canonical_quantity_unit"));
         assertTrue(stone.costsByHorizon().get(100).factors().get("quantity_cost").isKnown());
+        EconomicFactor timeCost = stone.costsByHorizon().get(100).factors().get("time_cost");
+        assertTrue(timeCost.isUnknown(),
+            "a known block-break loot quantity does not establish the duration of breaking the block");
+        assertEquals("worldgen evidence does not measure block-break extraction duration in ticks",
+            timeCost.reason());
         assertTrue(stone.costsByHorizon().get(100).factors().get("equipment_cost").isUnknown());
         assertTrue(!stone.economicCost().isKnown());
 
@@ -201,6 +243,118 @@ class AcquisitionAnalyzersTest {
         assertTrue(coal.costsByHorizon().get(100).factors().get("quantity_cost").isUnknown());
         assertTrue(!coal.economicCost().isKnown());
         assertEquals("UNKNOWN", coal.evidence().attributes().get("source_availability_classification"));
+    }
+
+    @Test
+    void activePositiveOakTreePathLinksOrdinaryBreakEvidenceWithoutResolvingQuantity() {
+        var oakTable = new LootTableAcquisitionAnalyzer.ParsedTable("minecraft:blocks/oak_log",
+            "block_loot", Map.of(), java.util.Set.of("minecraft:oak_log"), Map.of(),
+            java.util.Set.of("minecraft:oak_log"));
+        assertTrue(oakTable.unknownItems().contains("minecraft:oak_log"),
+            "survival evidence must not resolve the conditional loot quantity");
+        assertTrue(oakTable.ordinaryPlayerBreakOutputs().contains("minecraft:oak_log"));
+        var unsupportedTable = new LootTableAcquisitionAnalyzer.ParsedTable("minecraft:blocks/oak_log",
+            "block_loot", Map.of(), java.util.Set.of("minecraft:oak_log"), Map.of());
+        assertTrue(!unsupportedTable.ordinaryPlayerBreakOutputs().contains("minecraft:oak_log"),
+            "unsupported break conditions must not establish ordinary player drops");
+
+        var lootAnalyzer = LootTableAcquisitionAnalyzer.fromParsedTables(
+            List.of(oakTable), 1.0D, 100.0D);
+        Map<String, JsonObject> worldgenResources = Map.of(
+            "testmod:worldgen/biome/forest.json", json("""
+                {"features":[["testmod:trees"]]}
+                """),
+            "testmod:worldgen/placed_feature/trees.json", json("""
+                {"feature":"testmod:trees_selector","placement":[
+                  {"type":"minecraft:count","count":{"type":"minecraft:weighted_list","distribution":[
+                    {"data":0,"weight":19},{"data":1,"weight":1}
+                  ]}},
+                  {"type":"minecraft:in_square"},
+                  {"type":"minecraft:surface_water_depth_filter","max_water_depth":0},
+                  {"type":"minecraft:heightmap","heightmap":"OCEAN_FLOOR"},
+                  {"type":"minecraft:block_predicate_filter","predicate":{
+                    "type":"minecraft:would_survive",
+                    "state":{"Name":"minecraft:oak_sapling","Properties":{"stage":"0"}}
+                  }},
+                  {"type":"minecraft:biome"}
+                ]}
+                """),
+            "testmod:worldgen/configured_feature/trees_selector.json", json("""
+                {"type":"minecraft:random_selector","config":{
+                  "default":{"feature":"testmod:oak_tree","placement":[]},
+                  "features":[{"chance":0.33333334,
+                    "feature":{"feature":"testmod:fancy_oak_tree","placement":[]}}]
+                }}
+                """),
+            "testmod:worldgen/configured_feature/oak_tree.json", json("""
+                {"type":"minecraft:tree","config":{"trunk_provider":{
+                  "type":"minecraft:simple_state_provider","state":{"Name":"minecraft:oak_log"}
+                }}}
+                """),
+            "testmod:worldgen/configured_feature/fancy_oak_tree.json", json("""
+                {"type":"minecraft:tree","config":{"trunk_provider":{
+                  "type":"minecraft:simple_state_provider","state":{"Name":"minecraft:oak_log"}
+                }}}
+                """));
+        var discoveredSources = WorldgenAcquisitionAnalyzer.discoverBlockSources(worldgenResources);
+        var worldgen = WorldgenAcquisitionAnalyzer.fromResolvedBlockSources(discoveredSources,
+            Map.of("minecraft:oak_log", new WorldgenAcquisitionAnalyzer.BlockExtraction(
+                "minecraft:oak_log", "minecraft:blocks/oak_log", false)), lootAnalyzer)
+            .withActiveDimensionBiomes(Map.of("minecraft:overworld", java.util.Set.of("testmod:forest")));
+        AcquisitionPath discovered = worldgen.analyze("minecraft:oak_log").getFirst();
+        assertEquals("TRUE", discovered.evidence().attributes()
+            .get("configured_feature_generation_opportunity"));
+        assertEquals("minecraft:overworld", discovered.evidence().attributes().get("active_dimension"));
+        assertEquals("TRUE", discovered.evidence().attributes()
+            .get("ordinary_player_break_output_evidence"));
+        assertEquals("minecraft:oak_log", discovered.evidence().attributes().get("worldgen_block_item_id"));
+        assertEquals("false", discovered.evidence().attributes().get("worldgen_requires_correct_tool"));
+        assertTrue(discovered.feasibilityFactors().get("equipment_availability").isNotApplicable());
+        assertTrue(discovered.costsByHorizon().get(100).factors().get("equipment_cost").isNotApplicable());
+        assertTrue(discovered.costsByHorizon().get(100).factors().get("time_cost").isUnknown());
+        assertTrue(!discovered.evidence().measurement("expected_units_per_attempt").isKnown(),
+            "the conditional loot yield stays UNKNOWN even when ordinary-break availability is proven");
+
+        var toolRequiredWorldgen = WorldgenAcquisitionAnalyzer.fromResolvedBlockSources(discoveredSources,
+            Map.of("minecraft:oak_log", new WorldgenAcquisitionAnalyzer.BlockExtraction(
+                "minecraft:oak_log", "minecraft:blocks/oak_log", true)), lootAnalyzer);
+        AcquisitionPath toolRequired = toolRequiredWorldgen.analyze("minecraft:oak_log").getFirst();
+        assertTrue(toolRequired.feasibilityFactors().get("equipment_availability").isUnknown());
+        assertTrue(toolRequired.costsByHorizon().get(100).factors().get("equipment_cost").isUnknown());
+
+        Map<String, List<AcquisitionPath>> classified = new SurvivalAcquirabilityResolver()
+            .resolvePathAvailability(Map.of("minecraft:oak_log", List.of(discovered)));
+        assertEquals("TRUE", classified.get("minecraft:oak_log").getFirst().evidence().attributes()
+            .get("source_availability_classification"));
+        assertEquals("WORLDGEN_EXTRACTION", classified.get("minecraft:oak_log").getFirst().evidence().attributes()
+            .get("source_availability_stage"));
+
+        Map<String, JsonObject> zeroChanceResources = new java.util.HashMap<>(worldgenResources);
+        zeroChanceResources.put("testmod:worldgen/configured_feature/trees_selector.json", json("""
+            {"type":"minecraft:random_selector","config":{
+              "default":{"feature":"testmod:birch_tree","placement":[]},
+              "features":[{"chance":0.0,
+                "feature":{"feature":"testmod:fancy_oak_tree","placement":[]}}]
+            }}
+            """));
+        zeroChanceResources.put("testmod:worldgen/configured_feature/birch_tree.json", json("""
+            {"type":"minecraft:tree","config":{"trunk_provider":{
+              "type":"minecraft:simple_state_provider","state":{"Name":"minecraft:birch_log"}
+            }}}
+            """));
+        var zeroChanceWorldgen = WorldgenAcquisitionAnalyzer.fromResolvedBlockSources(
+            WorldgenAcquisitionAnalyzer.discoverBlockSources(zeroChanceResources),
+            Map.of("minecraft:oak_log", new WorldgenAcquisitionAnalyzer.BlockExtraction(
+                "minecraft:oak_log", "minecraft:blocks/oak_log", false)), lootAnalyzer)
+            .withActiveDimensionBiomes(Map.of("minecraft:overworld", java.util.Set.of("testmod:forest")));
+        AcquisitionPath zeroChanceOak = zeroChanceWorldgen.analyze("minecraft:oak_log").getFirst();
+        assertEquals("UNKNOWN", zeroChanceOak.evidence().attributes()
+            .get("configured_feature_generation_opportunity"),
+            "discovery of an impossible selector branch must remain UNKNOWN, not become a positive opportunity");
+        Map<String, List<AcquisitionPath>> zeroChanceClassification = new SurvivalAcquirabilityResolver()
+            .resolvePathAvailability(Map.of("minecraft:oak_log", List.of(zeroChanceOak)));
+        assertEquals("UNKNOWN", zeroChanceClassification.get("minecraft:oak_log").getFirst()
+            .evidence().attributes().get("source_availability_classification"));
     }
 
     @Test

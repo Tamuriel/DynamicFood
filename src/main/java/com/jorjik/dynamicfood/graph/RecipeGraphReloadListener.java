@@ -6,38 +6,67 @@ import com.jorjik.dynamicfood.core.DynamicFoodEngine;
 import com.jorjik.dynamicfood.core.IngredientContribution;
 import com.jorjik.dynamicfood.provenance.ItemStackFoodResolver;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.util.profiling.ProfilerFiller;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.ItemStackLinkedSet;
 import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.item.crafting.RecipeManager;
 import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+import net.neoforged.neoforge.common.conditions.ICondition;
 import net.neoforged.neoforge.event.AddReloadListenerEvent;
 import net.minecraft.server.packs.resources.SimplePreparableReloadListener;
+import net.minecraft.core.Holder;
 
 public final class RecipeGraphReloadListener extends SimplePreparableReloadListener<RecipeManager> {
     private final DynamicFoodEngine engine;
     private final RecipeManager recipeManager;
     private final HolderLookup.Provider registries;
+    private final Runnable onInputsReloaded;
+    private final ICondition.IContext reloadContext;
 
     public RecipeGraphReloadListener(DynamicFoodEngine engine, RecipeManager recipeManager, HolderLookup.Provider registries) {
+        this(engine, recipeManager, registries, () -> {}, null);
+    }
+
+    public RecipeGraphReloadListener(DynamicFoodEngine engine, RecipeManager recipeManager,
+        HolderLookup.Provider registries, Runnable onInputsReloaded) {
+        this(engine, recipeManager, registries, onInputsReloaded, null);
+    }
+
+    private RecipeGraphReloadListener(DynamicFoodEngine engine, RecipeManager recipeManager,
+        HolderLookup.Provider registries, Runnable onInputsReloaded, ICondition.IContext reloadContext) {
         this.engine = engine;
         this.recipeManager = recipeManager;
         this.registries = registries;
+        this.onInputsReloaded = java.util.Objects.requireNonNull(onInputsReloaded, "input reload callback");
+        this.reloadContext = reloadContext;
     }
 
     public static void register(AddReloadListenerEvent event, DynamicFoodEngine engine) {
+        register(event, engine, () -> {});
+    }
+
+    public static void register(AddReloadListenerEvent event, DynamicFoodEngine engine, Runnable onInputsReloaded) {
         event.addListener(new RecipeGraphReloadListener(
             engine,
             event.getServerResources().getRecipeManager(),
-            event.getRegistryAccess()
+            event.getRegistryAccess(),
+            onInputsReloaded,
+            event.getConditionContext()
         ));
     }
 
@@ -67,19 +96,24 @@ public final class RecipeGraphReloadListener extends SimplePreparableReloadListe
                 if (ingredient.isEmpty()) {
                     continue;
                 }
-                if (ingredient.hasNoItems()) {
+                ItemStack[] alternatives = resolveIngredientItems(ingredient);
+                if (alternatives.length == 0) {
                     acquisitionInputs.add(new AcquisitionIngredient(
-                        List.of(), 1, AcquisitionIngredient.InputUse.UNKNOWN));
+                        List.of(), 1, AcquisitionIngredient.InputUse.UNKNOWN,
+                        unresolvedIngredientReason(ingredient)));
                     continue;
                 }
-                ItemStack[] alternatives = ingredient.getItems();
-                inputs.add(resolveIngredientDefinition(ingredient));
+                inputs.add(resolveIngredientDefinition(alternatives));
+                List<String> alternativeIds = java.util.Arrays.stream(alternatives)
+                    .map(stack -> BuiltInRegistries.ITEM.getKey(stack.getItem()))
+                    .filter(java.util.Objects::nonNull)
+                    .map(Object::toString)
+                    .toList();
+                String unresolvedReason = alternativeIds.isEmpty()
+                    ? "resolved ingredient alternatives have no registered item identity"
+                    : "";
                 acquisitionInputs.add(new AcquisitionIngredient(
-                    java.util.Arrays.stream(alternatives)
-                        .map(stack -> BuiltInRegistries.ITEM.getKey(stack.getItem()))
-                        .filter(java.util.Objects::nonNull)
-                        .map(Object::toString)
-                        .toList(), 1, classifyInputUse(alternatives)));
+                    alternativeIds, 1, classifyInputUse(alternatives), unresolvedReason));
             }
             nodes.add(new RecipeNode(
                 holder.id().toString(),
@@ -96,8 +130,7 @@ public final class RecipeGraphReloadListener extends SimplePreparableReloadListe
         engine.replaceStaticRecipes(immutableNodes);
         engine.rebuildLootTableAnalyzer(resourceManager);
         engine.markStaticAcquisitionInputsReady();
-        engine.rebuildCalibrationWithDiscovery(DynamicFoodConfig.economicProfiles(),
-            DynamicFoodConfig.calibrationSettings());
+        onInputsReloaded.run();
         Set<String> loggedAmbiguities = new HashSet<>();
         Set<String> loggedCycles = new HashSet<>();
         for (RecipeNode node : immutableNodes) {
@@ -169,8 +202,45 @@ public final class RecipeGraphReloadListener extends SimplePreparableReloadListe
             && input.getCount() == remainder.getCount();
     }
 
-    private static IngredientContribution resolveIngredientDefinition(Ingredient ingredient) {
-        ItemStack[] alternatives = ingredient.getItems();
+    private ItemStack[] resolveIngredientItems(Ingredient ingredient) {
+        if (ingredient.isCustom() || reloadContext == null) {
+            return ingredient.hasNoItems() ? new ItemStack[0] : ingredient.getItems();
+        }
+
+        Map<ResourceLocation, Collection<Holder<Item>>> itemTags =
+            reloadContext.getAllTags(Registries.ITEM);
+        Set<ItemStack> alternatives = ItemStackLinkedSet.createTypeAndComponentsSet();
+        for (Ingredient.Value value : ingredient.getValues()) {
+            if (value instanceof Ingredient.ItemValue itemValue) {
+                alternatives.add(itemValue.item());
+            } else if (value instanceof Ingredient.TagValue tagValue) {
+                Collection<Holder<Item>> taggedItems = itemTags.get(tagValue.tag().location());
+                if (taggedItems != null) {
+                    taggedItems.stream().map(ItemStack::new).forEach(alternatives::add);
+                }
+            }
+        }
+        return alternatives.toArray(ItemStack[]::new);
+    }
+
+    private String unresolvedIngredientReason(Ingredient ingredient) {
+        if (ingredient.isCustom()) {
+            return "custom ingredient exposed no concrete item alternatives: "
+                + ingredient.getCustomIngredient().getClass().getName();
+        }
+        List<String> tags = java.util.Arrays.stream(ingredient.getValues())
+            .filter(Ingredient.TagValue.class::isInstance)
+            .map(value -> ((Ingredient.TagValue) value).tag().location().toString())
+            .sorted()
+            .toList();
+        if (!tags.isEmpty()) {
+            return "ingredient tag(s) resolved to no item alternatives during resource reload: "
+                + tags.stream().map(tag -> "#" + tag).collect(Collectors.joining(", "));
+        }
+        return "recipe ingredient exposed no concrete item alternatives";
+    }
+
+    private static IngredientContribution resolveIngredientDefinition(ItemStack[] alternatives) {
         List<IngredientContribution> foodAlternatives = new ArrayList<>();
         for (ItemStack alternative : alternatives) {
             IngredientContribution contribution = ItemStackFoodResolver.resolve(alternative);

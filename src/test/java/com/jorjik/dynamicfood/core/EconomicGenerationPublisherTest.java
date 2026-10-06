@@ -130,6 +130,62 @@ class EconomicGenerationPublisherTest {
     }
 
     @Test
+    void clearingCurrentGenerationDoesNotReuseGenerationNumbers() {
+        EconomicGenerationPublisher publisher = new EconomicGenerationPublisher();
+        PublishedEconomicGeneration first = publisher.rebuildAndPublish(
+            generation -> buildGeneration(generation, 0.25D));
+
+        publisher.clearCurrent();
+
+        assertTrue(publisher.current().isEmpty());
+        PublishedEconomicGeneration afterRestart = publisher.rebuildAndPublish(
+            generation -> buildGeneration(generation, 0.25D));
+        assertEquals(first.generation() + 1L, afterRestart.generation());
+        assertSame(afterRestart, publisher.current().orElseThrow());
+    }
+
+    @Test
+    void failedBuildKeepsCurrentGenerationAndDoesNotConsumeItsNextNumber() {
+        EconomicGenerationPublisher publisher = new EconomicGenerationPublisher();
+        PublishedEconomicGeneration current = publisher.rebuildAndPublish(
+            generation -> buildGeneration(generation, 0.25D));
+
+        assertThrows(IllegalStateException.class,
+            () -> publisher.rebuildAndPublish(generation -> {
+                throw new IllegalStateException("fixture build failure");
+            }));
+
+        assertSame(current, publisher.current().orElseThrow());
+        PublishedEconomicGeneration next = publisher.rebuildAndPublish(
+            generation -> buildGeneration(generation, 0.75D));
+        assertEquals(current.generation() + 1L, next.generation());
+        assertSame(next, publisher.current().orElseThrow());
+    }
+
+    @Test
+    void calibrationReplacementRequiresTheExpectedCurrentGeneration() {
+        EconomicGenerationPublisher publisher = new EconomicGenerationPublisher();
+        PublishedEconomicGeneration current = buildGeneration(10, 0.25D);
+        publisher.publish(current);
+        CalibrationSnapshot replacementCalibration = copyCalibration(
+            current.calibrationSnapshot(), null, current.generation());
+
+        PublishedEconomicGeneration replacement =
+            publisher.publishCalibrationForCurrent(current, replacementCalibration);
+
+        assertEquals(current.generation(), replacement.generation());
+        assertSame(current.economicSnapshot(), replacement.economicSnapshot());
+        assertSame(replacementCalibration, replacement.calibrationSnapshot());
+        assertSame(replacement, publisher.current().orElseThrow());
+
+        PublishedEconomicGeneration newer = buildGeneration(11, 0.75D);
+        publisher.publish(newer);
+        assertThrows(IllegalStateException.class,
+            () -> publisher.publishCalibrationForCurrent(current, replacementCalibration));
+        assertSame(newer, publisher.current().orElseThrow());
+    }
+
+    @Test
     void publicationAndReadsDoNotRunEconomicAcquisitionOrCalibrationWork() {
         AtomicInteger acquisitionAnalysisCalls = new AtomicInteger();
         AtomicInteger economicResolutionCalls = new AtomicInteger();

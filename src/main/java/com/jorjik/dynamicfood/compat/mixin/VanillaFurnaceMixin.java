@@ -9,7 +9,9 @@ import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.item.crafting.SingleRecipeInput;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.core.registries.BuiltInRegistries;
+import com.jorjik.dynamicfood.DynamicFood;
 import com.jorjik.dynamicfood.provenance.RuntimeFoodApplier;
+import com.jorjik.dynamicfood.provenance.RuntimeEconomicContext;
 import com.jorjik.dynamicfood.provenance.RuntimeProvenance;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -26,8 +28,9 @@ public abstract class VanillaFurnaceMixin {
         HolderLookup.Provider registries, RegistryAccess access, RecipeHolder<?> holder,
         NonNullList<ItemStack> items, int maxStackSize, AbstractFurnaceBlockEntity furnace) {
         ItemStack result = recipe.assemble(input, registries);
+        RuntimeEconomicContext economicContext = RuntimeEconomicContext.capture(DynamicFood.ECONOMIC_GENERATIONS);
         return RuntimeFoodApplier.decorateCandidate(result,
-            provenance(holder, furnace, input, result.getCount()));
+            provenance(holder, furnace, input, result.getCount(), economicContext), economicContext);
     }
 
     @Redirect(
@@ -39,12 +42,13 @@ public abstract class VanillaFurnaceMixin {
         HolderLookup.Provider registries, RegistryAccess access, RecipeHolder<?> holder,
         NonNullList<ItemStack> items, int maxStackSize, AbstractFurnaceBlockEntity furnace) {
         ItemStack result = recipe.assemble(input, registries);
+        RuntimeEconomicContext economicContext = RuntimeEconomicContext.capture(DynamicFood.ECONOMIC_GENERATIONS);
         return RuntimeFoodApplier.decorateCandidate(result,
-            provenance(holder, furnace, input, result.getCount()));
+            provenance(holder, furnace, input, result.getCount(), economicContext), economicContext);
     }
 
     private static RuntimeProvenance provenance(RecipeHolder<?> holder, AbstractFurnaceBlockEntity furnace,
-        SingleRecipeInput input, int outputCount) {
+        SingleRecipeInput input, int outputCount, RuntimeEconomicContext economicContext) {
         ItemStack consumed = input.getItem(0).copy();
         consumed.setCount(1);
         String recipeType = BuiltInRegistries.RECIPE_TYPE.getKey(holder.value().getType()).toString();
@@ -52,6 +56,6 @@ public abstract class VanillaFurnaceMixin {
             BuiltInRegistries.ITEM.getKey(furnace.getLevel() == null
                 ? consumed.getItem()
                 : holder.value().getResultItem(furnace.getLevel().registryAccess()).getItem()).toString(),
-            holder.id().toString(), recipeType, outputCount, java.util.List.of(consumed));
+            holder.id().toString(), recipeType, outputCount, java.util.List.of(consumed), economicContext);
     }
 }

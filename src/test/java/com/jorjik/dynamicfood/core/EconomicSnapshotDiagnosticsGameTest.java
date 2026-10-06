@@ -51,6 +51,31 @@ public final class EconomicSnapshotDiagnosticsGameTest {
         helper.assertTrue(resources.size() == snapshot.inputSet().resourceIds().size()
                 && summary.get("resources").getAsInt() == snapshot.resources().size(),
             "the report must retain every resource in the production generation input");
+        JsonObject acaciaLog = resources.asList().stream()
+            .map(element -> element.getAsJsonObject())
+            .filter(resource -> resource.get("resourceId").getAsString().equals("minecraft:acacia_log"))
+            .findFirst().orElse(null);
+        helper.assertTrue(acaciaLog != null, "the production snapshot must retain the acacia-log resource");
+        JsonObject acaciaWorldgen = acaciaLog == null ? null : acaciaLog.getAsJsonArray("paths").asList().stream()
+            .map(element -> element.getAsJsonObject())
+            .filter(path -> path.get("sourceType").getAsString().equals("worldgen_feature")
+                && path.getAsJsonObject("diagnostics").getAsJsonObject("evidence").getAsJsonObject("attributes")
+                    .get("worldgen_block_id").getAsString().equals("minecraft:acacia_log"))
+            .findFirst().orElse(null);
+        helper.assertTrue(acaciaWorldgen != null,
+            "the savanna tree feature and block-break extraction must be linked in production evidence");
+        boolean activeOverworldBiomeEvidence = snapshot.resources().values().stream()
+            .flatMap(resource -> resource.acquisitionPaths().stream())
+            .filter(path -> path.sourceType().equals("worldgen_feature"))
+            .map(path -> path.evidence().attributes().getOrDefault("dimension", ""))
+            .anyMatch(dimension -> dimension.contains("minecraft:overworld"));
+        helper.assertTrue(activeOverworldBiomeEvidence,
+            "production worldgen paths must retain biome membership from an active Overworld biome source");
+        if (acaciaWorldgen != null) {
+            helper.assertTrue(acaciaWorldgen.getAsJsonObject("availability")
+                    .get("classification").getAsString().equals("UNKNOWN"),
+                "worldgen tree discovery alone must not establish survival availability");
+        }
 
         long pathCount = 0;
         for (var resourceElement : resources) {

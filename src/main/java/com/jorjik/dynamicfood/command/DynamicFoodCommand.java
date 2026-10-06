@@ -5,9 +5,11 @@ import com.jorjik.dynamicfood.DynamicFood;
 import com.jorjik.dynamicfood.core.CalibrationSnapshot;
 import com.jorjik.dynamicfood.core.CalibratedFoodValue;
 import com.jorjik.dynamicfood.provenance.DynamicFoodValue;
+import com.jorjik.dynamicfood.provenance.RuntimeEconomicContext;
 import com.jorjik.dynamicfood.provenance.SaturationConverter;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -27,6 +29,13 @@ public final class DynamicFoodCommand {
                     DynamicFoodValue value = stack.get(DynamicFoodDataComponents.VALUE.get());
                     var vanillaFood = stack.get(DataComponents.FOOD);
                     StringBuilder output = new StringBuilder("Item: ").append(itemId);
+                    var publishedGeneration = DynamicFood.ECONOMIC_GENERATIONS.current();
+                    output.append("\nPublished runtime generation: ")
+                        .append(publishedGeneration.map(generation -> generation.generation()
+                            + " [economic=" + generation.economicContentSignature()
+                            + ", calibration=" + generation.calibrationSnapshot().signature() + "]")
+                            .orElse("none"))
+                        .append("\nThe following engine analysis is legacy diagnostic state, not the published snapshot.");
                     var economic = DynamicFood.ENGINE.recipeEconomicResult(itemId);
                     var resolvedEconomic = DynamicFood.ENGINE.economicCostResolution(itemId);
                     var resourceDifficulty = DynamicFood.ENGINE.resourceDifficulty(itemId);
@@ -141,6 +150,11 @@ public final class DynamicFoodCommand {
                             .append(", nutrition=").append(value.nutrition())
                             .append(", raw effective saturation=").append(value.rawSaturation())
                             .append(", effective saturation=").append(value.saturation())
+                            .append(", provenance=").append(value.origin())
+                                .append(", matches published generation=").append(publishedGeneration
+                                    .map(generation -> value.belongsTo(new RuntimeEconomicContext(
+                                        Optional.of(generation))))
+                                    .orElse(false))
                             .append(", equivalent builder saturation modifier=").append(SaturationConverter.effectiveToModifier(
                                     value.nutrition(), value.saturation()))
                             .append("\nRecipe: ").append(value.sourceRecipe())
@@ -155,6 +169,9 @@ public final class DynamicFoodCommand {
                             .append("\nOperation: type=").append(operation.recipeType())
                             .append(", station=").append(operation.station())
                             .append(", station difficulty=").append(operation.stationDifficulty())
+                            .append(", economic generation=").append(operation.economicGeneration().orElse(null))
+                            .append(", calibration signature=")
+                                .append(operation.calibrationContentSignature().orElse("unknown"))
                             .append("\n  Actual item inputs: ").append(operation.itemInputs().isEmpty()
                                 ? "none" : operation.itemInputs())
                             .append("\n  Fluid inputs: ").append(operation.fluidInputs().isEmpty()
@@ -228,14 +245,20 @@ public final class DynamicFoodCommand {
     }
 
     private static String calibrationReport() {
+        var publishedGeneration = DynamicFood.ECONOMIC_GENERATIONS.current();
         var snapshotOptional = DynamicFood.ENGINE.calibrationSnapshot();
         var settings = DynamicFood.ENGINE.calibrationSettings();
         if (snapshotOptional.isEmpty()) {
-            return "Food calibration is disabled; mode=" + settings.disabledMode()
+            return "Published runtime generation: "
+                + publishedGeneration.map(generation -> Long.toString(generation.generation())).orElse("none")
+                + "\nLegacy engine calibration diagnostics: Food calibration is disabled; mode=" + settings.disabledMode()
                 + ", preset=" + settings.gameplayPreset();
         }
         CalibrationSnapshot snapshot = snapshotOptional.get();
-        StringBuilder report = new StringBuilder("Calibration Status: ").append(snapshot.status())
+        StringBuilder report = new StringBuilder("Published runtime generation: ")
+            .append(publishedGeneration.map(generation -> Long.toString(generation.generation())).orElse("none"))
+            .append("\nLegacy engine calibration diagnostics (not necessarily the published snapshot)")
+            .append("\nCalibration Status: ").append(snapshot.status())
             .append("\nPopulation Size: ").append(snapshot.populationSize())
             .append("\nCandidate Weight: ").append(snapshot.candidatePopulationWeight())
             .append("\nResolved Weight: ").append(snapshot.resolvedPopulationWeight())

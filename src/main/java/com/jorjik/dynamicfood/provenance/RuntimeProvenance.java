@@ -38,6 +38,7 @@ public record RuntimeProvenance(
             foodOutputCount, resolvedInputs, operation.stationDifficulty());
     }
 
+    @Deprecated(forRemoval = false)
     public static RuntimeProvenance fromStacks(
         String resultItemId,
         String recipeId,
@@ -47,5 +48,17 @@ public record RuntimeProvenance(
     ) {
         return new RuntimeProvenance(resultItemId, recipeId, recipeType, outputCount,
             RuntimeFoodApplier.contributions(inputs));
+    }
+
+    public static RuntimeProvenance fromStacks(
+        String resultItemId,
+        String recipeId,
+        String recipeType,
+        int outputCount,
+        List<ItemStack> inputs,
+        RuntimeEconomicContext economicContext
+    ) {
+        return new RuntimeProvenance(resultItemId, recipeId, recipeType, outputCount,
+            RuntimeFoodApplier.contributions(inputs, economicContext));
     }
 }

@@ -25,7 +25,8 @@ public record OperationFoodSnapshot(
     double processingNutritionBonus,
     double processingSaturationBonus,
     Optional<Long> economicGeneration,
-    Optional<String> economicContentSignature
+    Optional<String> economicContentSignature,
+    Optional<String> calibrationContentSignature
 ) {
     public static final Codec<OperationFoodSnapshot> CODEC = RecordCodecBuilder.create(instance -> instance.group(
         Codec.STRING.fieldOf("recipe_type").forGetter(OperationFoodSnapshot::recipeType),
@@ -41,7 +42,9 @@ public record OperationFoodSnapshot(
         Codec.DOUBLE.fieldOf("processing_saturation_bonus").forGetter(OperationFoodSnapshot::processingSaturationBonus),
         Codec.LONG.optionalFieldOf("economic_generation").forGetter(OperationFoodSnapshot::economicGeneration),
         Codec.STRING.optionalFieldOf("economic_content_signature")
-            .forGetter(OperationFoodSnapshot::economicContentSignature)
+            .forGetter(OperationFoodSnapshot::economicContentSignature),
+        Codec.STRING.optionalFieldOf("calibration_content_signature")
+            .forGetter(OperationFoodSnapshot::calibrationContentSignature)
     ).apply(instance, OperationFoodSnapshot::new));
 
     public static final StreamCodec<ByteBuf, OperationFoodSnapshot> STREAM_CODEC = StreamCodec.of(
@@ -61,6 +64,9 @@ public record OperationFoodSnapshot(
             value.economicGeneration().ifPresent(generation -> {
                 ByteBufCodecs.VAR_LONG.encode(buffer, generation);
                 ByteBufCodecs.STRING_UTF8.encode(buffer, value.economicContentSignature().orElseThrow());
+                buffer.writeBoolean(value.calibrationContentSignature().isPresent());
+                value.calibrationContentSignature()
+                    .ifPresent(signature -> ByteBufCodecs.STRING_UTF8.encode(buffer, signature));
             });
         },
         buffer -> {
@@ -79,19 +85,30 @@ public record OperationFoodSnapshot(
                 ? Optional.of(ByteBufCodecs.VAR_LONG.decode(buffer)) : Optional.empty();
             Optional<String> economicContentSignature = economicGeneration.isPresent()
                 ? Optional.of(ByteBufCodecs.STRING_UTF8.decode(buffer)) : Optional.empty();
+            Optional<String> calibrationContentSignature = economicGeneration.isPresent() && buffer.readBoolean()
+                ? Optional.of(ByteBufCodecs.STRING_UTF8.decode(buffer)) : Optional.empty();
             return new OperationFoodSnapshot(recipeType, station, stationDifficulty, itemInputs,
                 fluidInputs, processingMetadata, allocationShare, componentNutrition, componentSaturation,
                 processingNutritionBonus, processingSaturationBonus, economicGeneration,
-                economicContentSignature);
+                economicContentSignature, calibrationContentSignature);
         }
     );
+
+    public OperationFoodSnapshot(String recipeType, String station, int stationDifficulty, String itemInputs,
+        String fluidInputs, String processingMetadata, double allocationShare, double componentNutrition,
+        double componentSaturation, double processingNutritionBonus, double processingSaturationBonus,
+        Optional<Long> economicGeneration, Optional<String> economicContentSignature) {
+        this(recipeType, station, stationDifficulty, itemInputs, fluidInputs, processingMetadata,
+            allocationShare, componentNutrition, componentSaturation, processingNutritionBonus,
+            processingSaturationBonus, economicGeneration, economicContentSignature, Optional.empty());
+    }
 
     public OperationFoodSnapshot(String recipeType, String station, int stationDifficulty, String itemInputs,
         String fluidInputs, String processingMetadata, double allocationShare, double componentNutrition,
         double componentSaturation, double processingNutritionBonus, double processingSaturationBonus) {
         this(recipeType, station, stationDifficulty, itemInputs, fluidInputs, processingMetadata,
             allocationShare, componentNutrition, componentSaturation, processingNutritionBonus,
-            processingSaturationBonus, Optional.empty(), Optional.empty());
+            processingSaturationBonus, Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     public OperationFoodSnapshot {
@@ -104,9 +121,13 @@ public record OperationFoodSnapshot(
         economicGeneration = economicGeneration == null ? Optional.empty() : economicGeneration;
         economicContentSignature = economicContentSignature == null
             ? Optional.empty() : economicContentSignature;
+        calibrationContentSignature = calibrationContentSignature == null
+            ? Optional.empty() : calibrationContentSignature;
         if (economicGeneration.isPresent() != economicContentSignature.isPresent()
             || economicGeneration.filter(generation -> generation < 1).isPresent()
-            || economicContentSignature.filter(String::isBlank).isPresent()) {
+            || economicContentSignature.filter(String::isBlank).isPresent()
+            || calibrationContentSignature.filter(String::isBlank).isPresent()
+            || calibrationContentSignature.isPresent() && economicGeneration.isEmpty()) {
             throw new IllegalArgumentException("economic generation and signature must be present together "
                 + "and valid");
         }
@@ -143,7 +164,8 @@ public record OperationFoodSnapshot(
             itemInputs, fluidInputs, metadata, allocationShare, componentNutrition, componentSaturation,
             operationNutrition - componentNutrition, operationSaturation - componentSaturation,
             context == null ? Optional.empty() : context.generation(),
-            context == null ? Optional.empty() : context.economicContentSignature());
+            context == null ? Optional.empty() : context.economicContentSignature(),
+            context == null ? Optional.empty() : context.calibrationContentSignature());
     }
 
     public static OperationFoodSnapshot from(RuntimeProvenance provenance, FoodValue value,
@@ -165,7 +187,7 @@ public record OperationFoodSnapshot(
         return new OperationFoodSnapshot(provenance.recipeType(), "unknown", provenance.stationDifficulty(),
             itemInputs, "", "", allocationShare, componentNutrition, componentSaturation,
             operationNutrition - componentNutrition, operationSaturation - componentSaturation,
-            context.generation(), context.economicContentSignature());
+            context.generation(), context.economicContentSignature(), context.calibrationContentSignature());
     }
 
     private static boolean unit(double value) {

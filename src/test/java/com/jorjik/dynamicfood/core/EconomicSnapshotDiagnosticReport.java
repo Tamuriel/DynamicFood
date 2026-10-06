@@ -281,6 +281,9 @@ public final class EconomicSnapshotDiagnosticReport {
         JsonArray unknown = new JsonArray();
         feasibility.missingFactors().forEach(unknown::add);
         result.add("unknownFactors", unknown);
+        JsonArray notApplicable = new JsonArray();
+        feasibility.notApplicableFactors().forEach(notApplicable::add);
+        result.add("notApplicableFactors", notApplicable);
         result.addProperty("reason", feasibilityReason(feasibility));
         return result;
     }

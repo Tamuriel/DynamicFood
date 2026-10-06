@@ -19,6 +19,7 @@ import net.minecraft.world.item.ItemStack;
 public final class ItemStackFoodResolver {
     private ItemStackFoodResolver() {}
 
+    @Deprecated(forRemoval = false)
     public static IngredientContribution resolve(ItemStack stack) {
         return resolve(stack, null);
     }
@@ -97,9 +98,12 @@ public final class ItemStackFoodResolver {
     }
 
     private static double automaticDifficulty(String itemId, RuntimeEconomicContext context) {
-        if (context == null || context.publishedGeneration().isEmpty()) {
+        if (context == null) {
             var resolution = DynamicFood.ENGINE.resourceDifficulty(itemId);
             return resolution.score() == null ? 0.0D : resolution.score();
+        }
+        if (context.publishedGeneration().isEmpty()) {
+            return 0.0D;
         }
         return context.publishedGeneration().orElseThrow().economicSnapshot().resource(itemId)
             .map(resource -> resource.economicResolution().difficulty())
@@ -107,10 +111,13 @@ public final class ItemStackFoodResolver {
             .orElse(0.0D);
     }
 
-    private static Optional<CalibratedBaseFoodValue> calibratedBaseFoodValue(String itemId,
+    static Optional<CalibratedBaseFoodValue> calibratedBaseFoodValue(String itemId,
         RuntimeEconomicContext context) {
-        if (context == null || context.publishedGeneration().isEmpty()) {
+        if (context == null) {
             return DynamicFood.ENGINE.calibratedBaseFoodValue(itemId);
+        }
+        if (context.publishedGeneration().isEmpty()) {
+            return Optional.empty();
         }
         var generation = context.publishedGeneration().orElseThrow();
         if (generation.calibrationSnapshot().status()

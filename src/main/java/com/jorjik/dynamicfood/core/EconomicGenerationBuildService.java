@@ -79,6 +79,26 @@ public final class EconomicGenerationBuildService {
         });
     }
 
+    public PublishedEconomicGeneration rebuildCalibrationAndPublish(
+        EconomicGenerationPublisher publisher,
+        Collection<ResourceEconomicProfile> configuredProfiles,
+        FoodCalibrationSettings settings
+    ) {
+        if (publisher == null || configuredProfiles == null || settings == null) {
+            throw new IllegalArgumentException("publisher, configured profiles, and settings are required");
+        }
+        PublishedEconomicGeneration current = publisher.current()
+            .orElseThrow(() -> new IllegalStateException(
+                "an economic generation must be published before calibration can be rebuilt"));
+        Map<String, ResourceEconomicProfile> configuredByItem = new HashMap<>();
+        configuredProfiles.forEach(profile -> configuredByItem.put(profile.resourceId(), profile));
+        List<ResourceEconomicProfile> population = calibrationPopulation(
+            current.economicSnapshot(), configuredByItem, settings);
+        CalibrationSnapshot calibrationSnapshot = CalibrationSnapshotBuilder.build(
+            current.economicSnapshot(), population, settings);
+        return publisher.publishCalibrationForCurrent(current, calibrationSnapshot);
+    }
+
     private static EconomicCostEvidenceProvider configuredCostEvidence(
         Map<String, ResourceEconomicProfile> configuredByItem
     ) {

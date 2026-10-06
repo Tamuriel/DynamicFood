@@ -15,17 +15,22 @@ public final class RawFoodStackInitializer {
 
     public static void onRightClickItem(PlayerInteractEvent.RightClickItem event) {
         ItemStack stack = event.getEntity().getItemInHand(event.getHand());
-        initialize(stack);
+        initialize(stack, RuntimeEconomicContext.capture(DynamicFood.ECONOMIC_GENERATIONS));
     }
 
     public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
         ItemStack stack = event.getEntity().getItemInHand(event.getHand());
-        initialize(stack);
+        initialize(stack, RuntimeEconomicContext.capture(DynamicFood.ECONOMIC_GENERATIONS));
     }
 
-    private static void initialize(ItemStack stack) {
-        if (stack.isEmpty() || stack.has(DynamicFoodDataComponents.VALUE.get())
-            || !DynamicFoodConfig.flag(DynamicFoodConfig.OVERRIDE_EXISTING_FOOD, true)) {
+    static void initialize(ItemStack stack, RuntimeEconomicContext economicContext) {
+        if (stack.isEmpty() || !DynamicFoodConfig.flag(DynamicFoodConfig.OVERRIDE_EXISTING_FOOD, true)
+            || economicContext == null || economicContext.publishedGeneration().isEmpty()) {
+            return;
+        }
+        DynamicFoodValue existingValue = stack.get(DynamicFoodDataComponents.VALUE.get());
+        if (existingValue != null && (existingValue.origin() != DynamicFoodValue.Origin.STATIC_CALIBRATED
+            || existingValue.belongsTo(economicContext))) {
             return;
         }
         FoodProperties existing = stack.get(DataComponents.FOOD);
@@ -34,10 +39,10 @@ public final class RawFoodStackInitializer {
         }
         String itemId = RuntimeFoodApplier.itemId(stack);
         if (ItemStackFoodResolver.profile(itemId).isEmpty()
-            && DynamicFood.ENGINE.calibratedBaseFoodValue(itemId).isEmpty()) {
+            && ItemStackFoodResolver.calibratedBaseFoodValue(itemId, economicContext).isEmpty()) {
             return;
         }
-        IngredientContribution contribution = ItemStackFoodResolver.resolve(stack);
+        IngredientContribution contribution = ItemStackFoodResolver.resolve(stack, economicContext);
         if (!contribution.foodComponent()) {
             return;
         }
@@ -47,7 +52,7 @@ public final class RawFoodStackInitializer {
         FoodValue snapshotValue = new FoodValue(perUnit.nutrition(),
             (int) Math.ceil(perUnit.nutrition()), perUnit.saturation(), perUnit.saturation(),
             perUnit.difficulty(), "raw:" + perUnit.sourceRecipe(), 1, java.util.List.of(perUnit));
-        DynamicFoodValue snapshot = DynamicFoodValue.snapshot(snapshotValue);
+        DynamicFoodValue snapshot = DynamicFoodValue.snapshotCalibrated(snapshotValue, economicContext);
         stack.set(DynamicFoodDataComponents.VALUE.get(), snapshot);
         stack.set(DataComponents.FOOD, FoodPropertiesUpdater.withDynamicValue(existing, snapshot));
     }

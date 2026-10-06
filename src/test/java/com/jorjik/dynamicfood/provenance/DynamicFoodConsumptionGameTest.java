@@ -55,7 +55,6 @@ import net.neoforged.neoforge.items.ItemStackHandler;
 import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import net.neoforged.neoforge.common.BasicItemListing;
-import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 
 @GameTestHolder(DynamicFood.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -322,6 +321,9 @@ public final class DynamicFoodConsumptionGameTest {
             helper.assertTrue(runtimeValue != null
                     && runtimeValue.operationSnapshot().orElseThrow().economicGeneration().orElseThrow()
                         == generation.generation()
+                    && runtimeValue.operationSnapshot().orElseThrow().calibrationContentSignature()
+                        .filter(generation.calibrationSnapshot().signature()::equals).isPresent()
+                    && runtimeValue.belongsTo(generationContext)
                     && runtimeValue.components().stream()
                         .anyMatch(component -> component.itemId().equals("minecraft:wheat")
                             && Double.compare(component.nutrition(), expectedWheatNutrition) == 0),
@@ -359,6 +361,49 @@ public final class DynamicFoodConsumptionGameTest {
             && Math.abs(contribution.saturation() - SaturationConverter.foodPropertiesToEffective(
                 vanilla.nutrition(), vanilla.saturation())) < 0.0001D,
             "a published disabled calibration must use the existing vanilla food-value behavior");
+        helper.succeed();
+    }
+
+    @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
+    public static void rawAndInheritedStackValuesRequireTheCapturedGeneration(GameTestHelper helper) {
+        EconomicGenerationPublisher emptyPublisher = new EconomicGenerationPublisher();
+        ItemStack rawBread = new ItemStack(Items.BREAD);
+        RawFoodStackInitializer.initialize(rawBread, RuntimeEconomicContext.capture(emptyPublisher));
+        helper.assertTrue(!rawBread.has(DynamicFoodDataComponents.VALUE.get()),
+            "raw stack initialization must not consult the legacy engine when no generation is published");
+
+        EconomicGenerationPublisher publisher = new EconomicGenerationPublisher();
+        PublishedEconomicGeneration firstGeneration = testGeneration(1L);
+        publisher.publish(firstGeneration);
+        RuntimeEconomicContext firstContext = RuntimeEconomicContext.capture(publisher);
+        RawFoodStackInitializer.initialize(rawBread, firstContext);
+        DynamicFoodValue calibrated = rawBread.get(DynamicFoodDataComponents.VALUE.get());
+        helper.assertTrue(calibrated != null
+                && calibrated.origin() == DynamicFoodValue.Origin.STATIC_CALIBRATED
+                && calibrated.belongsTo(firstContext),
+            "initialized raw food must retain the generation and signature used for calibration");
+
+        publisher.publish(testGeneration(2L));
+        RuntimeEconomicContext secondContext = RuntimeEconomicContext.capture(publisher);
+        ItemStack staleBread = rawBread.copy();
+        RawFoodStackInitializer.initialize(rawBread, secondContext);
+        DynamicFoodValue refreshed = rawBread.get(DynamicFoodDataComponents.VALUE.get());
+        helper.assertTrue(refreshed != null && refreshed.belongsTo(secondContext),
+            "raw calibrated stacks must refresh when their calibration generation becomes stale");
+        IngredientContribution expectedCurrentContribution = ItemStackFoodResolver.resolve(rawBread, secondContext);
+        IngredientContribution inheritedContribution = RuntimeFoodApplier.contribution(staleBread, 1, secondContext);
+        helper.assertTrue(inheritedContribution.sourceRecipe().equals(expectedCurrentContribution.sourceRecipe())
+                && Double.compare(inheritedContribution.nutrition(), expectedCurrentContribution.nutrition()) == 0
+                && Double.compare(inheritedContribution.saturation(), expectedCurrentContribution.saturation()) == 0,
+            "a stack value from an older generation must be recalculated from the captured current generation");
+
+        RuntimeEconomicContext emptyContext = RuntimeEconomicContext.capture(emptyPublisher);
+        IngredientContribution expectedWithoutGeneration = ItemStackFoodResolver.resolve(staleBread, emptyContext);
+        IngredientContribution withoutGeneration = RuntimeFoodApplier.contribution(staleBread, 1, emptyContext);
+        helper.assertTrue(withoutGeneration.sourceRecipe().equals(expectedWithoutGeneration.sourceRecipe())
+                && Double.compare(withoutGeneration.nutrition(), expectedWithoutGeneration.nutrition()) == 0
+                && Double.compare(withoutGeneration.saturation(), expectedWithoutGeneration.saturation()) == 0,
+            "a stale inherited value must not be used when the captured context has no generation");
         helper.succeed();
     }
 
@@ -409,14 +454,22 @@ public final class DynamicFoodConsumptionGameTest {
 
     @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
     public static void rawCalibratedFoodGetsStackSnapshotBeforeConsumption(GameTestHelper helper) {
-        DynamicFood.ENGINE.rebuildCalibration(List.of(new ResourceEconomicProfile(
-            "minecraft:bread", "minecraft:bread", 0.5D, 1.0D, 1.0D,
-            true, true, SurvivalAcquirability.TRUE, false, false)),
-            new FoodCalibrationSettings(true, "vanilla", 1, 0.70D, 0.30D,
-                0.05D, 0.95D, 0.50D, 0.80D, "medium",
+        EconomicGenerationPublisher publisher = new EconomicGenerationPublisher();
+        publisher.rebuildAndPublish(generation -> {
+            EconomicSnapshot economic = EconomicSnapshotBuilder.build(generation, List.of("minecraft:bread"),
+                List.of(), (resourceId, paths) -> new EconomicCostResolution(
+                    EconomicCost.known(0.5D, "gametest:bread", 100, "raw stack lifecycle fixture"),
+                    null, ResolutionStatus.COMPLETE, 100, null, paths, 1.0D, List.of("fixture")));
+            var candidate = new ResourceEconomicProfile("minecraft:bread", "minecraft:bread", null,
+                1.0D, 1.0D, true, true, SurvivalAcquirability.TRUE, false, false);
+            FoodCalibrationSettings settings = new FoodCalibrationSettings(true, "vanilla", 1,
+                0.70D, 0.30D, 0.05D, 0.95D, 0.50D, 0.80D, "medium",
                 List.of(new CalibrationAnchor(0.0D, 6.0D), new CalibrationAnchor(1.0D, 6.0D)),
                 List.of(new CalibrationAnchor(0.0D, 9.0D), new CalibrationAnchor(1.0D, 9.0D)),
-                2.0D, 0.0D));
+                2.0D, 0.0D);
+            var calibration = CalibrationSnapshotBuilder.build(economic, List.of(candidate), settings);
+            return new PublishedEconomicGeneration(economic, calibration);
+        });
 
         Player player = helper.makeMockPlayer(GameType.SURVIVAL);
         player.getFoodData().setFoodLevel(10);
@@ -424,7 +477,7 @@ public final class DynamicFoodConsumptionGameTest {
         ItemStack bread = new ItemStack(Items.BREAD);
         player.setItemInHand(InteractionHand.MAIN_HAND, bread);
 
-        RawFoodStackInitializer.onRightClickItem(new PlayerInteractEvent.RightClickItem(player, InteractionHand.MAIN_HAND));
+        RawFoodStackInitializer.initialize(bread, RuntimeEconomicContext.capture(publisher));
         helper.assertTrue(bread.has(DynamicFoodDataComponents.VALUE.get()),
             "raw calibrated food must receive a per-stack DynamicFoodValue snapshot");
         helper.assertTrue(bread.get(DataComponents.FOOD).nutrition() == 6
@@ -588,27 +641,29 @@ public final class DynamicFoodConsumptionGameTest {
     }
 
     @GameTest(template = "bastion/blocks/air", templateNamespace = "minecraft")
-    public static void legacyTransactionAllocatesOneOperationAcrossFoodOutputs(GameTestHelper helper) {
-        ItemStack input = new ItemStack(Items.WHEAT);
-        DynamicFoodValue inputValue = new DynamicFoodValue(5.0D, 5, 2.0D, 2.0F,
-            1.0D, "gametest:legacy_input", 1, List.of());
-        input.set(DynamicFoodDataComponents.VALUE.get(), inputValue);
+    public static void transactionAllocatesOnePublishedOperationAcrossFoodOutputs(GameTestHelper helper) {
+        EconomicGenerationPublisher publisher = new EconomicGenerationPublisher();
+        PublishedEconomicGeneration generation = testGeneration(10L);
+        publisher.publish(generation);
+        RuntimeEconomicContext economicContext = RuntimeEconomicContext.capture(publisher);
+        ItemStack input = new ItemStack(Items.BREAD);
+        IngredientContribution inputContribution = ItemStackFoodResolver.resolve(input, economicContext);
         ItemStack firstFood = new ItemStack(Items.BREAD);
         ItemStack secondFood = new ItemStack(Items.COOKED_BEEF);
         ItemStack technicalOutput = new ItemStack(Items.BOWL);
         List<ItemStack> outputs = List.of(firstFood, secondFood, technicalOutput);
-        RuntimeProvenance provenance = RuntimeProvenance.fromStacks("minecraft:bread",
-            "gametest:legacy_multi_output", "minecraft:crafting", 2, List.of(input));
-        var operationValue = DynamicFood.ENGINE.resolve(provenance);
+        RuntimeProvenance provenance = new RuntimeProvenance("minecraft:bread",
+            "gametest:published_multi_output", "minecraft:crafting", 2, List.of(inputContribution));
+        var operationValue = DynamicFood.ENGINE.resolve(provenance, economicContext);
 
-        new RecipeTransactionHandler().onTransaction(new RecipeTransactionEvent(
-            outputs, "gametest:legacy_multi_output", "minecraft:crafting", List.of(input)));
+        new RecipeTransactionHandler(publisher).onTransaction(new RecipeTransactionEvent(
+            outputs, "gametest:published_multi_output", "minecraft:crafting", List.of(input)));
 
         DynamicFoodValue firstValue = firstFood.get(DynamicFoodDataComponents.VALUE.get());
         DynamicFoodValue secondValue = secondFood.get(DynamicFoodDataComponents.VALUE.get());
         helper.assertTrue(firstValue != null && secondValue != null
             && technicalOutput.get(DynamicFoodDataComponents.VALUE.get()) == null,
-            "legacy transactions must decorate only food outputs");
+            "transactions must decorate only food outputs");
         double allocatedNutrition = firstValue.rawNutrition() * firstFood.getCount()
             + secondValue.rawNutrition() * secondFood.getCount();
         double allocatedSaturation = firstValue.rawSaturation() * firstFood.getCount()
@@ -617,10 +672,12 @@ public final class DynamicFoodConsumptionGameTest {
             < 0.0001D
             && Math.abs(allocatedSaturation - operationValue.rawSaturation() * operationValue.outputCount())
                 < 0.0001D,
-            "the sum of legacy food output values must equal one operation total, not duplicate it");
+            "the sum of food outputs must equal one generation-bound operation total, not duplicate it");
         helper.assertTrue(Math.abs(firstValue.operationSnapshot().orElseThrow().allocationShare()
                 + secondValue.operationSnapshot().orElseThrow().allocationShare() - 1.0D) < 0.0001D,
-            "legacy output allocation shares must sum to one");
+            "output allocation shares must sum to one");
+        helper.assertTrue(firstValue.belongsTo(economicContext) && secondValue.belongsTo(economicContext),
+            "every allocated output must preserve the operation's captured generation");
         helper.succeed();
     }
 
@@ -716,18 +773,37 @@ public final class DynamicFoodConsumptionGameTest {
             .toList();
         helper.assertTrue(!coalOreWorldgen.isEmpty(),
             "vanilla coal ore worldgen evidence must link to its block-break output paths");
-        helper.assertTrue(coalOreWorldgen.stream()
-            .allMatch(path -> path.costsByHorizon().get(100).factors().get("quantity_cost").isUnknown()
+        List<AcquisitionPath> invalidCoalOreWorldgen = coalOreWorldgen.stream()
+            .filter(path -> !(path.costsByHorizon().get(100).factors().get("quantity_cost").isUnknown()
                 && path.costsByHorizon().get(100).factors().get("equipment_cost").isUnknown()
                 && !path.economicCost().isKnown()
                 && path.evidence().measurement("expected_units_per_attempt") != null
                 && !path.evidence().measurement("expected_units_per_attempt").isKnown()
+                && path.evidence().attributes().get("canonical_quantity_source")
+                    .equals("unknown: no indexed block-loot extraction output")
                 && path.evidence().attributes().get("canonical_quantity_unit")
-                    .equals("item per block-break loot invocation")
+                    .equals("item per defined extraction operation (unresolved)")
                 && path.evidence().attributes().get("block_loot_table")
                     .equals("minecraft:blocks/coal_ore")
-                && path.evidence().attributes().get("survival_availability").startsWith("unknown:")),
-            "worldgen paths must use the registered block loot table while leaving conditional extraction and accessibility unresolved");
+                && "UNKNOWN".equals(path.evidence().attributes()
+                    .get("source_availability_classification"))
+                && !path.evidence().attributes().getOrDefault("survival_availability", "").isBlank()))
+            .toList();
+        helper.assertTrue(invalidCoalOreWorldgen.isEmpty(),
+            "worldgen paths must use the registered block loot table while leaving conditional extraction and "
+                + "accessibility unresolved; invalid path count=" + invalidCoalOreWorldgen.size()
+                + ", samples=" + invalidCoalOreWorldgen.stream().limit(3)
+                    .map(path -> path.sourceId() + " factors=" + path.costsByHorizon().get(100).factors()
+                        + " economicCost=" + path.economicCost()
+                        + " measurements=" + path.evidence().measurements()
+                        + " attributes=" + path.evidence().attributes())
+                    .toList());
+        var coalOreAvailability = DynamicFood.ENGINE.survivalAcquirability("minecraft:coal_ore");
+        helper.assertTrue(coalOreAvailability.state() == SurvivalAcquirability.UNKNOWN
+            && !coalOreAvailability.stage().isBlank()
+            && !coalOreAvailability.blocker().isBlank(),
+            "coal ore availability must remain UNKNOWN with resolver-stage and blocker evidence: "
+                + coalOreAvailability);
         helper.assertTrue(DynamicFood.ENGINE.survivalAcquirability("minecraft:wheat").state()
                 == SurvivalAcquirability.UNKNOWN
             && DynamicFood.ENGINE.survivalAcquirability("minecraft:coal").state()

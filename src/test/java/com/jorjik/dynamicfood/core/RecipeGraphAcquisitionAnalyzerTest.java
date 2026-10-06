@@ -59,4 +59,19 @@ class RecipeGraphAcquisitionAnalyzerTest {
         assertTrue(path.costsByHorizon().get(100).factors().get("material_cost").isUnknown());
         assertTrue(path.costsByHorizon().get(100).factors().get("resource_consumption_cost").isUnknown());
     }
+
+    @Test
+    void unresolvedInputReasonIsPreservedInAcquisitionEvidence() {
+        String reason = "ingredient tag(s) resolved to no item alternatives: #test:missing";
+        RecipeGraph graph = new RecipeGraph();
+        graph.add(new RecipeNode("test:missing_recipe", "minecraft:crafting", "test:output", 1,
+            List.of(), null, List.of(new AcquisitionIngredient(
+                List.of(), 1, AcquisitionIngredient.InputUse.UNKNOWN, reason)), true));
+
+        AcquisitionPath path = new RecipeGraphAcquisitionAnalyzer(graph,
+            (itemId, horizon) -> EconomicCost.unknown("no independent EconomicCost"),
+            1.0D, 100.0D).analyze("test:output").getFirst();
+
+        assertEquals(reason, path.evidence().attributes().get("input_0_unresolved_reason"));
+    }
 }
