@@ -15,7 +15,7 @@ import java.util.TreeMap;
 import java.util.function.BiFunction;
 
 public final class EconomicSnapshotBuilder {
-    public static final int SCHEMA_VERSION = 4;
+    public static final int SCHEMA_VERSION = 5;
     static final Comparator<AcquisitionPath> PATH_ORDER = Comparator
         .comparing(AcquisitionPath::itemId)
         .thenComparing(AcquisitionPath::sourceType)

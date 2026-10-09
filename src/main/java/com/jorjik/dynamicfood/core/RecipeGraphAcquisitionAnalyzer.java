@@ -12,24 +12,17 @@ public final class RecipeGraphAcquisitionAnalyzer implements AcquisitionAnalyzer
     private final RecipeGraph graph;
     private final double quantityReference;
     private final double quantityCap;
-    private final double timeReferenceTicks;
-    private final double timeCapTicks;
-
     public RecipeGraphAcquisitionAnalyzer(RecipeGraph graph, EconomicCostEvidenceProvider independentEvidence,
         double materialReference, double materialCap) {
         this(graph, independentEvidence, materialReference, materialCap,
             com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsReference(),
-            com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsCap(),
-            com.jorjik.dynamicfood.config.DynamicFoodConfig.timeCostReferenceTicks(),
-            com.jorjik.dynamicfood.config.DynamicFoodConfig.timeCostCapTicks());
+            com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsCap());
     }
 
     public RecipeGraphAcquisitionAnalyzer(RecipeGraph graph, EconomicCostEvidenceProvider independentEvidence,
-        double materialReference, double materialCap, double quantityReference, double quantityCap,
-        double timeReferenceTicks, double timeCapTicks) {
-        if (!positiveFinite(quantityReference) || !positiveFinite(quantityCap)
-            || !positiveFinite(timeReferenceTicks) || !positiveFinite(timeCapTicks)) {
-            throw new IllegalArgumentException("quantity and time normalization references must be finite and positive");
+        double materialReference, double materialCap, double quantityReference, double quantityCap) {
+        if (!positiveFinite(quantityReference) || !positiveFinite(quantityCap)) {
+            throw new IllegalArgumentException("quantity normalization references must be finite and positive");
         }
         this.graph = graph;
         if (!positiveFinite(materialReference) || !positiveFinite(materialCap)) {
@@ -38,8 +31,6 @@ public final class RecipeGraphAcquisitionAnalyzer implements AcquisitionAnalyzer
         this.economics = new RecipeEconomicAnalyzer(graph, independentEvidence);
         this.quantityReference = quantityReference;
         this.quantityCap = quantityCap;
-        this.timeReferenceTicks = timeReferenceTicks;
-        this.timeCapTicks = timeCapTicks;
     }
 
     @Override
@@ -62,42 +53,22 @@ public final class RecipeGraphAcquisitionAnalyzer implements AcquisitionAnalyzer
             Map<Integer, CostVector> costsByHorizon = new HashMap<>();
             for (int horizon : supportedHorizons()) {
                 RecipeEconomicResult resolved = economics.resolveUsingRecipe(recipe, horizon);
-                Map<String, EconomicFactor> costFactors = new java.util.LinkedHashMap<>();
-                costFactors.put("quantity_cost", FactorNormalizer.quantityCostForHorizon(recipe.outputCount(),
+                Map<EconomicChannel, EconomicFactor> costFactors = new java.util.EnumMap<>(EconomicChannel.class);
+                costFactors.put(EconomicChannel.QUANTITY, FactorNormalizer.quantityCostForHorizon(recipe.outputCount(),
                     horizon, quantityReference, quantityCap));
-                costFactors.put("time_cost", recipe.processingTimeTicks() != null
-                    ? FactorNormalizer.logarithmic(recipe.processingTimeTicks() / recipe.outputCount() * horizon,
-                        timeReferenceTicks, timeCapTicks)
-                    : recipe.recipeType().equals("minecraft:crafting")
-                        ? EconomicFactor.notApplicable(
-                            "crafting recipes have no time-based processing mechanic")
-                        : EconomicFactor.unknown("processing duration is not exposed by this recipe type"));
-                costFactors.put("material_cost", !resolved.target().isKnown()
+                costFactors.put(EconomicChannel.PROBABILITY_BURDEN, EconomicFactor.notApplicable(
+                    "recipe output selection is deterministic; no independent probability burden is evidenced"));
+                costFactors.put(EconomicChannel.MATERIAL_CONSUMPTION, !resolved.target().isKnown()
                     || resolved.status() != ResolutionStatus.COMPLETE
                     ? EconomicFactor.unknown("recursive material EconomicCost is UNKNOWN: "
                         + resolved.target().evidence() + "; recursion status=" + resolved.status())
                     : EconomicFactor.known(resolved.target().value()));
-                costFactors.put("prerequisite_cost", EconomicFactor.notApplicable(
-                    "recipe definition exposes no separate acquisition prerequisite"));
-                costFactors.put("progression_cost", EconomicFactor.notApplicable(
-                    "recipe definition exposes no progression-gated acquisition"));
-                costFactors.put("equipment_cost", recipe.recipeType().startsWith("minecraft:crafting")
+                costFactors.put(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN,
+                    recipe.recipeType().startsWith("minecraft:crafting")
                     && recipe.acquisitionIngredients().stream().noneMatch(input ->
                         input.inputUse() != com.jorjik.dynamicfood.graph.AcquisitionIngredient.InputUse.CONSUMED)
                     ? EconomicFactor.notApplicable("vanilla crafting recipe metadata has no required machine")
                     : EconomicFactor.unknown("recipe metadata does not expose machine acquisition cost"));
-                costFactors.put("danger_cost", EconomicFactor.notApplicable(
-                    "recipe processing has no world-danger mechanic in the recipe definition"));
-                costFactors.put("transport_cost", EconomicFactor.notApplicable(
-                    "recipe definition contains no transport mechanic"));
-                costFactors.put("intermediate_cost", EconomicFactor.notApplicable(
-                    "recursive intermediate inputs are included in material_cost"));
-                costFactors.put("resource_consumption_cost", recipe.acquisitionIngredients().stream()
-                    .anyMatch(input -> input.inputUse() ==
-                        com.jorjik.dynamicfood.graph.AcquisitionIngredient.InputUse.UNKNOWN)
-                    ? EconomicFactor.unknown("recipe input consumption or remainder is unresolved")
-                    : EconomicFactor.notApplicable(
-                        "consumed recipe inputs are represented by the recursive material EconomicCost"));
                 costsByHorizon.put(horizon, new CostVector(horizon, costFactors));
             }
             RecipeEconomicResult resolved = economics.resolveUsingRecipe(recipe,

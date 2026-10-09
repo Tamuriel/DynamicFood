@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 
 class RecipeGraphAcquisitionAnalyzerTest {
     @Test
-    void craftingTimeIsNotApplicableAndInputEvidenceIsPreserved() {
+    void craftingDurationIsDiagnosticAndInputEvidenceIsPreserved() {
         RecipeGraph graph = new RecipeGraph();
         RecipeNode recipe = new RecipeNode("test:craft", "minecraft:crafting", "test:output", 4,
             List.of(), null, List.of(new AcquisitionIngredient(List.of("test:input"), 2)), true);
@@ -21,7 +21,10 @@ class RecipeGraphAcquisitionAnalyzerTest {
             (itemId, horizon) -> EconomicCost.unknown("no independent EconomicCost"),
             1.0D, 100.0D).analyze("test:output").getFirst();
 
-        assertTrue(path.costsByHorizon().get(100).factors().get("time_cost").isNotApplicable());
+        assertTrue(!path.costsByHorizon().get(100).factors().containsKey("time_cost"));
+        assertTrue(!path.evidence().measurement("processing_time_ticks").isKnown());
+        assertTrue(path.costsByHorizon().get(100)
+            .factor(EconomicChannel.PROBABILITY_BURDEN).isNotApplicable());
         assertEquals(List.of(new AcquisitionIngredient(List.of("test:input"), 2)),
             path.evidence().inputs());
         assertEquals("TRUE", path.evidence().attributes().get("recipe_operation_availability"));
@@ -39,7 +42,7 @@ class RecipeGraphAcquisitionAnalyzerTest {
             (itemId, horizon) -> EconomicCost.unknown("no independent EconomicCost"),
             1.0D, 100.0D).analyze("test:output").getFirst();
 
-        assertTrue(path.costsByHorizon().get(100).factors().get("time_cost").isKnown());
+        assertTrue(!path.costsByHorizon().get(100).factors().containsKey("time_cost"));
         assertEquals(200.0D, path.evidence().measurement("processing_time_ticks").value());
     }
 
@@ -57,7 +60,7 @@ class RecipeGraphAcquisitionAnalyzerTest {
 
         assertEquals(1, path.evidence().inputs().size());
         assertTrue(path.costsByHorizon().get(100).factors().get("material_cost").isUnknown());
-        assertTrue(path.costsByHorizon().get(100).factors().get("resource_consumption_cost").isUnknown());
+        assertTrue(!path.costsByHorizon().get(100).factors().containsKey("resource_consumption_cost"));
     }
 
     @Test

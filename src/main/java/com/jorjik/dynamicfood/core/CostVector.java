@@ -1,33 +1,63 @@
 package com.jorjik.dynamicfood.core;
 
+import java.util.EnumMap;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Set;
+import java.util.Objects;
 import java.util.TreeMap;
 
-public record CostVector(int economicHorizon, Map<String, EconomicFactor> factors) {
-    public static final Set<String> CORE_FACTORS = Set.of(
-        "quantity_cost", "time_cost", "material_cost", "equipment_cost");
-    public static final Set<String> ADDITIONAL_FACTORS = Set.of(
-        "progression_cost", "prerequisite_cost", "intermediate_cost", "danger_cost",
-        "transport_cost", "resource_consumption_cost");
+public final class CostVector {
+    private final int economicHorizon;
+    private final Map<EconomicChannel, EconomicFactor> channels;
 
-    public CostVector {
+    public CostVector(int economicHorizon, Map<?, EconomicFactor> factors) {
         if (economicHorizon < 1) {
             throw new IllegalArgumentException("economicHorizon must be positive");
         }
-        factors = Map.copyOf(factors);
-        if (factors.keySet().stream().anyMatch(name ->
-            !CORE_FACTORS.contains(name) && !ADDITIONAL_FACTORS.contains(name))) {
-            throw new IllegalArgumentException("CostVector contains a non-policy economic factor");
+        if (factors == null) {
+            throw new IllegalArgumentException("economic channels are required");
         }
+        EnumMap<EconomicChannel, EconomicFactor> typed = new EnumMap<>(EconomicChannel.class);
+        factors.forEach((key, factor) -> {
+            EconomicChannel channel = key instanceof EconomicChannel economicChannel
+                ? economicChannel
+                : key instanceof String id ? EconomicChannel.fromId(id).orElse(null) : null;
+            if (channel == null) {
+                throw new IllegalArgumentException("unsupported economic channel: " + key);
+            }
+            if (factor == null || typed.putIfAbsent(channel, factor) != null) {
+                throw new IllegalArgumentException("each economic channel must have one factor: " + channel.id());
+            }
+        });
+        this.economicHorizon = economicHorizon;
+        this.channels = Collections.unmodifiableMap(new EnumMap<>(typed));
+    }
+
+    public int economicHorizon() {
+        return economicHorizon;
+    }
+
+    public Map<EconomicChannel, EconomicFactor> channels() {
+        return channels;
+    }
+
+    public EconomicFactor factor(EconomicChannel channel) {
+        return channels.get(channel);
+    }
+
+    public Map<String, EconomicFactor> factors() {
+        Map<String, EconomicFactor> result = new LinkedHashMap<>();
+        channels.forEach((channel, factor) -> result.put(channel.id(), factor));
+        return Collections.unmodifiableMap(result);
     }
 
     public Map<String, String> unknownCoreFactors() {
         Map<String, String> unknown = new TreeMap<>();
-        for (String name : CORE_FACTORS) {
-            EconomicFactor factor = factors.get(name);
+        for (EconomicChannel channel : EconomicChannel.values()) {
+            EconomicFactor factor = channels.get(channel);
             if (factor == null || factor.isUnknown()) {
-                unknown.put(name, factor == null
+                unknown.put(channel.id(), factor == null
                     ? "core factor applicability was not reported"
                     : factor.reason());
             }
@@ -39,33 +69,20 @@ public record CostVector(int economicHorizon, Map<String, EconomicFactor> factor
         return unknownCoreFactors().isEmpty();
     }
 
-    public double additionalCoverage(Map<String, Double> factorWeights) {
-        double maxWeight = 0.0D;
-        for (String name : ADDITIONAL_FACTORS) {
-            double weight = factorWeights.getOrDefault(name, 0.0D);
-            EconomicFactor factor = factors.get(name);
-            if (weight <= 0.0D || factor != null && factor.isNotApplicable()) {
-                continue;
-            }
-            maxWeight = Math.max(maxWeight, weight);
-        }
-        if (maxWeight == 0.0D) {
-            return 1.0D;
-        }
-        double applicableWeight = 0.0D;
-        double knownWeight = 0.0D;
-        for (String name : ADDITIONAL_FACTORS) {
-            double weight = factorWeights.getOrDefault(name, 0.0D);
-            EconomicFactor factor = factors.get(name);
-            if (weight <= 0.0D || factor != null && factor.isNotApplicable()) {
-                continue;
-            }
-            double scaledWeight = weight / maxWeight;
-            applicableWeight += scaledWeight;
-            if (factor != null && factor.isKnown()) {
-                knownWeight += scaledWeight;
-            }
-        }
-        return knownWeight / applicableWeight;
+    @Override
+    public boolean equals(Object other) {
+        return this == other || other instanceof CostVector vector
+            && economicHorizon == vector.economicHorizon
+            && channels.equals(vector.channels);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(economicHorizon, channels);
+    }
+
+    @Override
+    public String toString() {
+        return "CostVector[economicHorizon=" + economicHorizon + ", factors=" + factors() + "]";
     }
 }

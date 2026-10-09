@@ -494,34 +494,24 @@ public final class WorldgenAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 Map.entry("reliability", EconomicFactor.unknown(
                     "runtime generation conditions are not evaluated")
                 ));
-            Map<String, EconomicFactor> costFactors = Map.ofEntries(
-                Map.entry("time_cost", EconomicFactor.unknown(
-                    "worldgen evidence does not measure block-break extraction duration in ticks")),
-                Map.entry("prerequisite_cost", EconomicFactor.notApplicable(
-                    "worldgen feature definitions contain no player prerequisite operation")),
-                Map.entry("progression_cost", EconomicFactor.notApplicable(
-                    "worldgen data has no progression-gated generation mechanic")),
-                Map.entry("equipment_cost", equipmentCost(source.requiresCorrectTool())),
-                Map.entry("danger_cost", EconomicFactor.unknown(
-                    "biome and dimension evidence does not determine player danger")),
-                Map.entry("transport_cost", EconomicFactor.unknown(
-                    "biome restrictions do not determine player travel distance")),
-                Map.entry("intermediate_cost", EconomicFactor.notApplicable(
-                    "worldgen placement has no recursive recipe inputs")),
-                Map.entry("resource_consumption_cost", EconomicFactor.unknown(
-                    "tool durability and mining consumables are not represented by feature data")),
-                Map.entry("material_cost", EconomicFactor.notApplicable(
-                    "worldgen placement has no consumed player material inputs")));
+            Map<EconomicChannel, EconomicFactor> costFactors = new java.util.EnumMap<>(EconomicChannel.class);
+            costFactors.put(EconomicChannel.PROBABILITY_BURDEN, EconomicFactor.unknown(
+                "worldgen source availability lacks a comparable opportunity unit and bounded burden normalization"));
+            costFactors.put(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN,
+                equipmentCost(source.requiresCorrectTool()));
+            costFactors.put(EconomicChannel.MATERIAL_CONSUMPTION, EconomicFactor.notApplicable(
+                "worldgen block extraction has no separately consumed player material input"));
             Map<Integer, CostVector> costsByHorizon = new HashMap<>();
             for (int horizon : supportedHorizons()) {
-                Map<String, EconomicFactor> horizonFactors = new HashMap<>(costFactors);
+                Map<EconomicChannel, EconomicFactor> horizonFactors = new java.util.EnumMap<>(costFactors);
                 CostVector extractionCosts = source.extractionPath() == null
                     ? null : source.extractionPath().costsByHorizon().get(horizon);
-                horizonFactors.put("quantity_cost", extractionCosts == null
+                horizonFactors.put(EconomicChannel.QUANTITY, extractionCosts == null
                     ? EconomicFactor.unknown(
                         "no indexed block-loot extraction quantity is available at this horizon")
-                    : extractionCosts.factors().getOrDefault("quantity_cost",
-                        EconomicFactor.unknown("block-loot quantity is unavailable at this horizon")));
+                    : extractionCosts.factor(EconomicChannel.QUANTITY) == null
+                        ? EconomicFactor.unknown("block-loot quantity is unavailable at this horizon")
+                        : extractionCosts.factor(EconomicChannel.QUANTITY));
                 costsByHorizon.put(horizon, new CostVector(horizon, horizonFactors));
             }
             Map<String, AcquisitionMeasurement> evidence = new HashMap<>(source.measurements());

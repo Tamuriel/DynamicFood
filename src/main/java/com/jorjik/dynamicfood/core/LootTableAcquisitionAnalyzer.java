@@ -174,25 +174,13 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
 
     private CostVector lootCostVector(int horizon, EconomicFactor quantity,
         Double probability, Double expectedYield) {
-        Map<String, EconomicFactor> factors = new HashMap<>();
-        factors.put("quantity_cost", quantity);
-        boolean canonicalQuantityKnown = quantity.isKnown();
-        factors.put("time_cost", EconomicFactor.unknown("loot-table data does not expose time per acquisition attempt"));
-        factors.put("prerequisite_cost", EconomicFactor.unknown(
-            "source access requirements are not represented by loot output data"));
-        factors.put("progression_cost", EconomicFactor.unknown(
-            "source progression requirements are not represented by loot output data"));
-        factors.put("equipment_cost", EconomicFactor.unknown(
+        Map<EconomicChannel, EconomicFactor> factors = new java.util.EnumMap<>(EconomicChannel.class);
+        factors.put(EconomicChannel.QUANTITY, quantity);
+        factors.put(EconomicChannel.PROBABILITY_BURDEN, EconomicFactor.notApplicable(
+            "loot selection probability is represented by canonical expected quantity"));
+        factors.put(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN, EconomicFactor.unknown(
             "required tools or equipment are not represented by loot output data"));
-        factors.put("danger_cost", EconomicFactor.unknown(
-            "source-specific danger is not represented by loot output data"));
-        factors.put("transport_cost", EconomicFactor.unknown(
-            "source accessibility and travel distance are not represented by loot output data"));
-        factors.put("intermediate_cost", EconomicFactor.notApplicable(
-            "loot functions describe the output rather than recursive recipe inputs"));
-        factors.put("resource_consumption_cost", EconomicFactor.unknown(
-            "source-specific consumables are not represented by loot output data"));
-        factors.put("material_cost", EconomicFactor.unknown(
+        factors.put(EconomicChannel.MATERIAL_CONSUMPTION, EconomicFactor.unknown(
             "source-specific inputs are not represented by loot output data"));
         return new CostVector(horizon, factors);
     }

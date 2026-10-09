@@ -61,11 +61,11 @@ class DynamicFoodEngineTest {
 
         AcquisitionCost notApplicable = AcquisitionCostResolver.resolve(testCostVector(100, Map.of(
             "quantity_cost", quantity,
-            "time_cost", EconomicFactor.notApplicable("not modeled")
-        )), Map.of("quantity_cost", 1.0D, "time_cost", 1.0D));
+            "probability_burden", EconomicFactor.notApplicable("selection is represented by quantity")
+        )), DynamicFoodConfig.costFactorWeights());
         assertEquals(ResolutionStatus.COMPLETE, notApplicable.status());
         assertTrue(notApplicable.missingFactors().isEmpty());
-        assertEquals(1, notApplicable.notApplicableFactors().size());
+        assertTrue(notApplicable.notApplicableFactors().containsKey("probability_burden"));
     }
 
     @Test
@@ -85,21 +85,21 @@ class DynamicFoodEngineTest {
     @Test
     void acquisitionCostDistinguishesCompletePartialAndUnknownFactors() {
         Map<String, Double> weights = Map.of(
-            "quantity_cost", 1.0D, "time_cost", 1.0D, "resource_consumption_cost", 1.0D);
+            "quantity_cost", 1.0D, "probability_burden", 1.0D);
         AcquisitionCost complete = AcquisitionCostResolver.resolve(testCostVector(100, Map.of(
-            "quantity_cost", EconomicFactor.known(0.2D), "time_cost", EconomicFactor.known(0.6D))), weights);
+            "quantity_cost", EconomicFactor.known(0.2D), "probability_burden", EconomicFactor.known(0.6D))), weights);
         AcquisitionCost partial = AcquisitionCostResolver.resolve(testCostVector(100, Map.of(
-            "quantity_cost", EconomicFactor.known(0.2D), "time_cost", EconomicFactor.notApplicable("not modeled"),
-            "resource_consumption_cost", EconomicFactor.unknown("not observable"))), weights);
+            "quantity_cost", EconomicFactor.known(0.2D),
+            "probability_burden", EconomicFactor.notApplicable("selection is represented by quantity"))), weights);
         AcquisitionCost unknown = AcquisitionCostResolver.resolve(testCostVector(100, Map.of(
-            "quantity_cost", EconomicFactor.known(0.2D), "time_cost", EconomicFactor.unknown("missing"))),
-            Map.of("quantity_cost", 1.0D, "time_cost", 1.0D));
+            "quantity_cost", EconomicFactor.known(0.2D),
+            "probability_burden", EconomicFactor.unknown("normalization is unsupported"))), weights);
 
         assertEquals(ResolutionStatus.COMPLETE, complete.status());
         assertEquals(0.4D, complete.cost(), 0.0D);
         assertEquals(ResolutionStatus.COMPLETE, partial.status());
         assertEquals(0.2D, partial.cost(), 0.0D);
-        assertTrue(partial.missingFactors().containsKey("resource_consumption_cost"));
+        assertTrue(partial.missingFactors().isEmpty());
         assertEquals(ResolutionStatus.UNKNOWN, unknown.status());
         assertEquals(null, unknown.cost());
     }
@@ -133,13 +133,13 @@ class DynamicFoodEngineTest {
                 "progression_requirement", EconomicFactor.notApplicable("no progression gate")
             ),
             Map.of("quantity_cost", EconomicFactor.known(0.4D),
-                "time_cost", EconomicFactor.notApplicable("not modeled")), 100);
+                "probability_burden", EconomicFactor.notApplicable("no independent burden")), 100);
 
         FeasibilityResult feasibility = FeasibilityResolver.resolve(path,
             Map.of("repeatability", 1.0D, "danger", 1.0D, "progression_requirement", 1.0D),
             1.0D, 0.5D, false);
         AcquisitionCost cost = AcquisitionCostResolver.resolve(path.costsByHorizon().get(100),
-            Map.of("quantity_cost", 1.0D, "time_cost", 1.0D));
+            DynamicFoodConfig.costFactorWeights());
 
         assertEquals(1.0D, feasibility.coverage(), 0.0D);
         assertEquals(ResolutionStatus.COMPLETE, feasibility.status());
@@ -147,8 +147,9 @@ class DynamicFoodEngineTest {
         assertEquals(2, feasibility.notApplicableFactors().size());
         assertEquals(0.4D, cost.cost(), 0.0D);
         assertEquals(ResolutionStatus.COMPLETE, cost.status());
-        assertEquals(Map.of("time_cost", "not modeled"),
-            cost.notApplicableFactors());
+        assertTrue(cost.notApplicableFactors().containsKey("probability_burden"));
+        assertEquals("no independent burden",
+            cost.notApplicableFactors().get("probability_burden"));
     }
 
     @Test
@@ -643,8 +644,8 @@ class DynamicFoodEngineTest {
         assertTrue(path.economicCost().isKnown());
         assertEquals(0.6D, path.economicCost().value(), 1.0E-15D);
         assertEquals(0.6D, path.costsByHorizon().get(100).factors().get("material_cost").value(), 1.0E-15D);
-        assertEquals(FactorNormalizer.logarithmic(30000.0D, 200.0D, 72000.0D),
-            path.costsByHorizon().get(100).factors().get("time_cost"));
+        assertEquals(600.0D, path.evidence().measurement("processing_time_ticks").value(), 0.0D);
+        assertFalse(path.costsByHorizon().get(100).factors().containsKey("time_cost"));
     }
 
     @Test
@@ -692,7 +693,7 @@ class DynamicFoodEngineTest {
         graph.add(new RecipeNode("testmod:cooked_meal", "minecraft:smelting", "testmod:meal", 2,
             List.of(IngredientContribution.of("testmod:raw_food", 1.0D, 0.2D, 1, true)), 600.0D));
         RecipeGraphAcquisitionAnalyzer analyzer = new RecipeGraphAcquisitionAnalyzer(graph,
-            EconomicCostEvidenceProvider.unknown(), 1.0D, 100.0D, 1.0D, 10000.0D, 200.0D, 72000.0D);
+            EconomicCostEvidenceProvider.unknown(), 1.0D, 100.0D, 1.0D, 10000.0D);
 
         AcquisitionPath path = analyzer.analyze("testmod:meal").getFirst();
         CostVector vector = path.costsByHorizon().get(100);
@@ -701,9 +702,8 @@ class DynamicFoodEngineTest {
             path.costsByHorizon().get(1).factors().get("quantity_cost"));
         assertEquals(FactorNormalizer.quantityCostForHorizon(2.0D, 100, 1.0D, 10000.0D),
             vector.factors().get("quantity_cost"));
-        assertEquals(FactorNormalizer.logarithmic(30000.0D, 200.0D, 72000.0D),
-            vector.factors().get("time_cost"));
-        assertTrue(vector.factors().get("danger_cost").isNotApplicable());
+        assertEquals(600.0D, path.evidence().measurement("processing_time_ticks").value(), 0.0D);
+        assertFalse(vector.factors().containsKey("time_cost"));
     }
 
     @Test
@@ -2047,7 +2047,7 @@ class DynamicFoodEngineTest {
 
     private static CostVector testCostVector(int horizon, Map<String, EconomicFactor> costFactors) {
         Map<String, EconomicFactor> factors = new java.util.LinkedHashMap<>(costFactors);
-        java.util.stream.Stream.concat(CostVector.CORE_FACTORS.stream(), CostVector.ADDITIONAL_FACTORS.stream())
+        java.util.Arrays.stream(EconomicChannel.values()).map(EconomicChannel::id)
             .filter(name -> !factors.containsKey(name))
             .forEach(name -> factors.put(name,
                 EconomicFactor.notApplicable("not part of this focused test path")));

@@ -59,11 +59,12 @@ public final class OakLogDirectAcquisitionGameTest {
             com.jorjik.dynamicfood.config.DynamicFoodConfig.acquisitionEconomicHorizon());
         helper.assertTrue(oakCosts != null
                 && oakCosts.factors().get("quantity_cost").isKnown()
-                && oakCosts.factors().get("time_cost").isUnknown()
+                && oakCosts.factor(EconomicChannel.PROBABILITY_BURDEN).isUnknown()
                 && oakCosts.factors().get("material_cost").isNotApplicable()
                 && oakCosts.factors().get("equipment_cost").isNotApplicable()
+                && !oakCosts.factors().containsKey("time_cost")
                 && !oakCosts.isCoreComplete(),
-            "oak quantity is known; time remains unmeasured; material and required equipment do not apply");
+            "oak quantity is known; unresolved source availability burden blocks completeness; duration is diagnostic");
         FeasibilityResult oakFeasibility = oakSource == null ? null : FeasibilityResolver.resolve(oakSource,
             com.jorjik.dynamicfood.config.DynamicFoodConfig.feasibilityFactorWeights(),
             com.jorjik.dynamicfood.config.DynamicFoodConfig.minimumFeasibilityCoverage(),

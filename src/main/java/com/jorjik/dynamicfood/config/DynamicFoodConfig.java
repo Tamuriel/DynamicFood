@@ -21,9 +21,7 @@ public final class DynamicFoodConfig {
         "resource_consumption|1", "intermediate_steps|1", "equipment_availability|1",
         "reliability|1");
     private static final List<String> DEFAULT_COST_FACTOR_WEIGHTS = List.of(
-        "quantity_cost|1", "time_cost|1", "material_cost|1", "equipment_cost|1",
-        "progression_cost|1", "prerequisite_cost|1", "intermediate_cost|1",
-        "danger_cost|1", "transport_cost|1", "resource_consumption_cost|1");
+        "quantity_cost|1", "probability_burden|1", "material_cost|1", "equipment_cost|1");
 
     public static final ModConfigSpec.BooleanValue FOOD_CALIBRATION_ENABLED = BUILDER
         .comment("Enable self-calibrated FoodIndex for resources with known economic profiles.")
@@ -102,14 +100,6 @@ public final class DynamicFoodConfig {
     public static final ModConfigSpec.DoubleValue LOOT_ATTEMPTS_CAP = BUILDER
         .defineInRange("acquisition.normalization.quantity.attempts_cap", 10000.0D, 0.000001D, 1.0E12D);
 
-    public static final ModConfigSpec.DoubleValue TIME_COST_REFERENCE_TICKS = BUILDER
-        .comment("Reference expected processing ticks per output unit for normalized recipe time cost.")
-        .defineInRange("acquisition.normalization.time.reference_ticks", 200.0D, 0.000001D, 1.0E12D);
-
-    public static final ModConfigSpec.DoubleValue TIME_COST_CAP_TICKS = BUILDER
-        .comment("Expected processing ticks per output unit normalized to the maximum time cost.")
-        .defineInRange("acquisition.normalization.time.cap_ticks", 72000.0D, 0.000001D, 1.0E12D);
-
     public static final ModConfigSpec.ConfigValue<String> ACQUISITION_PRIMARY_PATH_STRATEGY = BUILDER
         .comment("best_repeatable_cost, weighted_average, minimum_feasible or median_feasible.")
         .define("acquisition.primary_path_strategy", "best_repeatable_cost",
@@ -137,7 +127,7 @@ public final class DynamicFoodConfig {
             value -> value instanceof String);
 
     public static final ModConfigSpec.ConfigValue<List<? extends String>> COST_FACTOR_WEIGHTS = BUILDER
-        .comment("Economic policy weights use factor|weight; valid factors are quantity_cost, time_cost, material_cost, equipment_cost, progression_cost, prerequisite_cost, intermediate_cost, danger_cost, transport_cost and resource_consumption_cost.")
+        .comment("Economic policy weights use factor|weight; valid factors are quantity_cost, probability_burden, material_cost and equipment_cost.")
         .defineList("acquisition.cost.factor_weights", DEFAULT_COST_FACTOR_WEIGHTS,
             DynamicFoodConfig::isCostWeightEntry);
 
@@ -337,14 +327,6 @@ public final class DynamicFoodConfig {
         return number(LOOT_ATTEMPTS_CAP, 10000.0D);
     }
 
-    public static double timeCostReferenceTicks() {
-        return number(TIME_COST_REFERENCE_TICKS, 200.0D);
-    }
-
-    public static double timeCostCapTicks() {
-        return number(TIME_COST_CAP_TICKS, 72000.0D);
-    }
-
     public static com.jorjik.dynamicfood.core.PrimaryPathStrategy acquisitionStrategy() {
         return com.jorjik.dynamicfood.core.PrimaryPathStrategy.parse(
             text(ACQUISITION_PRIMARY_PATH_STRATEGY, "best_repeatable_cost"));
@@ -378,17 +360,15 @@ public final class DynamicFoodConfig {
         Map<String, Double> configured = parseWeights(
             strings(COST_FACTOR_WEIGHTS, DEFAULT_COST_FACTOR_WEIGHTS), "cost");
         Map<String, Double> result = new LinkedHashMap<>();
-        for (String factor : com.jorjik.dynamicfood.core.CostVector.CORE_FACTORS) {
-            result.put(factor, configured.getOrDefault(factor, 1.0D));
-        }
-        for (String factor : com.jorjik.dynamicfood.core.CostVector.ADDITIONAL_FACTORS) {
-            result.put(factor, configured.getOrDefault(factor, 1.0D));
+        for (com.jorjik.dynamicfood.core.EconomicChannel channel
+            : com.jorjik.dynamicfood.core.EconomicChannel.values()) {
+            result.put(channel.id(), configured.getOrDefault(channel.id(), 1.0D));
         }
         return Map.copyOf(result);
     }
 
     public static String economicPolicySignature() {
-        StringBuilder signature = new StringBuilder("economic-policy-v1");
+        StringBuilder signature = new StringBuilder("economic-policy-v2:phase02-core-v2");
         costFactorWeights().entrySet().stream().sorted(Map.Entry.comparingByKey())
             .forEach(entry -> signature.append('|').append(entry.getKey()).append('=')
                 .append(Double.toHexString(entry.getValue())));
@@ -404,9 +384,7 @@ public final class DynamicFoodConfig {
             .append("|materialReference=").append(Double.toHexString(materialCostReference()))
             .append("|materialCap=").append(Double.toHexString(materialCostCap()))
             .append("|quantityReference=").append(Double.toHexString(lootAttemptsReference()))
-            .append("|quantityCap=").append(Double.toHexString(lootAttemptsCap()))
-            .append("|timeReference=").append(Double.toHexString(timeCostReferenceTicks()))
-            .append("|timeCap=").append(Double.toHexString(timeCostCapTicks()));
+            .append("|quantityCap=").append(Double.toHexString(lootAttemptsCap()));
         return signature.toString();
     }
 
@@ -415,8 +393,8 @@ public final class DynamicFoodConfig {
             return false;
         }
         String[] parts = entry.split("\\|", -1);
-        return parts.length == 2 && (com.jorjik.dynamicfood.core.CostVector.CORE_FACTORS.contains(parts[0].trim())
-            || com.jorjik.dynamicfood.core.CostVector.ADDITIONAL_FACTORS.contains(parts[0].trim()))
+        return parts.length == 2
+            && com.jorjik.dynamicfood.core.EconomicChannel.fromId(parts[0].trim()).isPresent()
             && isFiniteNonNegative(parts[1].trim());
     }
 

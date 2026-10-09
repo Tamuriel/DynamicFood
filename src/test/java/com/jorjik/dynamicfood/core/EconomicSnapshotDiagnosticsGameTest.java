@@ -20,8 +20,7 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 @PrefixGameTestTemplate(false)
 public final class EconomicSnapshotDiagnosticsGameTest {
     private static final List<String> FACTORS = List.of(
-        "quantity", "time", "material", "equipment", "progression", "prerequisite",
-        "intermediate", "danger", "transport", "resource_consumption");
+        "quantity", "probability_burden", "material", "equipment");
 
     private EconomicSnapshotDiagnosticsGameTest() {}
 
@@ -41,6 +40,7 @@ public final class EconomicSnapshotDiagnosticsGameTest {
             Files.readString(reportPath, StandardCharsets.UTF_8)).getAsJsonObject();
 
         helper.assertTrue(parsed.get("schema").getAsInt() == 1
+                && parsed.get("economicSnapshotSchema").getAsInt() == EconomicSnapshotBuilder.SCHEMA_VERSION
                 && parsed.get("generation").getAsLong() == generation.generation()
                 && parsed.get("economicPolicySignature").getAsString().equals(
                     com.jorjik.dynamicfood.config.DynamicFoodConfig.economicPolicySignature())
@@ -87,7 +87,7 @@ public final class EconomicSnapshotDiagnosticsGameTest {
                 JsonObject factors = path.getAsJsonObject("costVector").getAsJsonObject("factors");
                 helper.assertTrue(factors.size() == FACTORS.size()
                         && FACTORS.stream().allMatch(factors::has),
-                    "every discovered path must serialize all ten policy factors");
+                    "every discovered path must serialize the four canonical economic channels");
                 helper.assertTrue(path.has("pipeline") && path.has("acquisitionCost")
                         && path.has("economicResolution") && path.has("diagnostics"),
                     "every path must retain pipeline, cost, resource-resolution and evidence diagnostics");

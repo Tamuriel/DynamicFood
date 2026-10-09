@@ -39,6 +39,7 @@ public final class DynamicFoodEngine {
     private final RecipeValueCache cache = new RecipeValueCache();
     private final RecipeAdapterRegistry adapters = new RecipeAdapterRegistry();
     private final List<AcquisitionAnalyzer> acquisitionAnalyzers = new CopyOnWriteArrayList<>();
+    private final ProviderContributionRegistry providerContributionRegistry = new ProviderContributionRegistry();
     private volatile CalibrationSnapshot calibrationSnapshot;
     private volatile Map<String, ResourceEconomicProfile> economicProfiles = Map.of();
     private volatile FoodCalibrationSettings calibrationSettings = FoodCalibrationSettings.defaults();
@@ -103,6 +104,18 @@ public final class DynamicFoodEngine {
         adapters.register(adapter);
     }
 
+    public void registerProvider(MechanicProvider provider) {
+        providerContributionRegistry.register(provider);
+    }
+
+    public void clearProviders() {
+        providerContributionRegistry.clear();
+    }
+
+    public EffectiveMechanicModel effectiveMechanicModel() {
+        return providerContributionRegistry.resolve();
+    }
+
     public RecipeOperation createRecipeOperation(Recipe<?> recipe, String recipeId, String recipeType, String station,
         List<ItemStack> itemInputs, List<FluidStack> fluidInputs, List<ItemStack> outputs,
         java.util.Map<String, Double> processingMetadata) {
@@ -129,6 +142,7 @@ public final class DynamicFoodEngine {
         acquisitionPathCache.clear();
         recipeEconomicAnalyzer = null;
         recipeGraphAcquisitionAnalyzer = null;
+        providerContributionRegistry.clear();
     }
 
     public synchronized void rebuildCalibration(Collection<ResourceEconomicProfile> profiles,
@@ -430,9 +444,7 @@ public final class DynamicFoodEngine {
                 com.jorjik.dynamicfood.config.DynamicFoodConfig.materialCostReference(),
                 com.jorjik.dynamicfood.config.DynamicFoodConfig.materialCostCap(),
                 com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsReference(),
-                com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsCap(),
-                com.jorjik.dynamicfood.config.DynamicFoodConfig.timeCostReferenceTicks(),
-                com.jorjik.dynamicfood.config.DynamicFoodConfig.timeCostCapTicks());
+                com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsCap());
             recipeGraphAcquisitionAnalyzer = analyzer;
         }
         return analyzer;
@@ -451,8 +463,7 @@ public final class DynamicFoodEngine {
         List<AcquisitionAnalyzer> analyzers = new ArrayList<>();
         analyzers.add(new RecipeGraphAcquisitionAnalyzer(graph, independentEconomicEvidence,
             DynamicFoodConfig.materialCostReference(), DynamicFoodConfig.materialCostCap(),
-            DynamicFoodConfig.lootAttemptsReference(), DynamicFoodConfig.lootAttemptsCap(),
-            DynamicFoodConfig.timeCostReferenceTicks(), DynamicFoodConfig.timeCostCapTicks()));
+            DynamicFoodConfig.lootAttemptsReference(), DynamicFoodConfig.lootAttemptsCap()));
         if (lootTableAcquisitionAnalyzer != null) {
             analyzers.add(lootTableAcquisitionAnalyzer);
         }

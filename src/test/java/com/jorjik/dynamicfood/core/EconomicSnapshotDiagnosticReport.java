@@ -17,22 +17,11 @@ public final class EconomicSnapshotDiagnosticReport {
     private static final List<FactorDefinition> FACTORS = List.of(
         new FactorDefinition("quantity", "quantity_cost", true,
             List.of("expected_units_per_attempt", "crop_harvest_expected_units_per_loot_invocation")),
-        new FactorDefinition("time", "time_cost", true,
-            List.of("processing_time_ticks", "crop_growth_time_ticks")),
+        new FactorDefinition("probability_burden", "probability_burden", true,
+            List.of("probability_burden_raw", "worldgen_occurrence_probability")),
         new FactorDefinition("material", "material_cost", true,
             List.of("material_cost_per_output")),
-        new FactorDefinition("equipment", "equipment_cost", true,
-            List.of("equipment_cost")),
-        new FactorDefinition("progression", "progression_cost", false,
-            List.of("progression_gate", "required_villager_level")),
-        new FactorDefinition("prerequisite", "prerequisite_cost", false,
-            List.of("prerequisite_cost", "restock_dependency")),
-        new FactorDefinition("intermediate", "intermediate_cost", false,
-            List.of("intermediate_steps")),
-        new FactorDefinition("danger", "danger_cost", false, List.of("danger")),
-        new FactorDefinition("transport", "transport_cost", false, List.of("transport", "travel_distance")),
-        new FactorDefinition("resource_consumption", "resource_consumption_cost", false,
-            List.of("resource_consumption", "restock_dependency", "input_quantity:")));
+        new FactorDefinition("equipment", "equipment_cost", true, List.of("equipment_cost")));
 
     private EconomicSnapshotDiagnosticReport() {}
 
@@ -81,6 +70,7 @@ public final class EconomicSnapshotDiagnosticReport {
 
         JsonObject report = new JsonObject();
         report.addProperty("schema", 1);
+        report.addProperty("economicSnapshotSchema", snapshot.schemaVersion());
         report.addProperty("generation", snapshot.generation());
         report.addProperty("economicPolicySignature", DynamicFoodConfig.economicPolicySignature());
         report.addProperty("snapshotSignature", snapshot.signature());
@@ -180,7 +170,8 @@ public final class EconomicSnapshotDiagnosticReport {
         }
         if (cost == null || cost.status() == ResolutionStatus.UNKNOWN) {
             if (vector != null) {
-                for (String factor : List.of("quantity_cost", "time_cost", "material_cost", "equipment_cost")) {
+                for (EconomicChannel channel : EconomicChannel.values()) {
+                    String factor = channel.id();
                     EconomicFactor value = vector.factors().get(factor);
                     if (value == null || value.isUnknown()) {
                         return new PathBlocker("UNKNOWN_CORE_FACTOR_" + factor.substring(0,
@@ -311,14 +302,12 @@ public final class EconomicSnapshotDiagnosticReport {
         JsonObject coverage = new JsonObject();
         int knownApplicable = 0;
         int applicable = 0;
-        for (FactorDefinition definition : FACTORS) {
-            if (!definition.core()) {
-                EconomicFactor factor = vector == null ? null : vector.factors().get(definition.key());
-                if (factor == null || !factor.isNotApplicable()) {
-                    applicable++;
-                    if (factor != null && factor.isKnown()) {
-                        knownApplicable++;
-                    }
+        for (EconomicChannel channel : EconomicChannel.values()) {
+            EconomicFactor factor = vector == null ? null : vector.factor(channel);
+            if (factor == null || !factor.isNotApplicable()) {
+                applicable++;
+                if (factor != null && factor.isKnown()) {
+                    knownApplicable++;
                 }
             }
         }
@@ -327,9 +316,9 @@ public final class EconomicSnapshotDiagnosticReport {
         if (vector == null) {
             coverage.add("ratio", JsonNull.INSTANCE);
         } else {
-            coverage.addProperty("ratio", vector.additionalCoverage(weights));
+            coverage.addProperty("ratio", applicable == 0 ? 1.0D : (double) knownApplicable / applicable);
         }
-        result.add("additionalCoverage", coverage);
+        result.add("coreCoverage", coverage);
         JsonObject factors = new JsonObject();
         for (FactorDefinition definition : FACTORS) {
             factors.add(definition.name(), factorJson(path, vector, definition, weights,
@@ -427,18 +416,13 @@ public final class EconomicSnapshotDiagnosticReport {
         JsonArray included = new JsonArray();
         JsonArray excluded = new JsonArray();
         JsonArray unknownCore = new JsonArray();
-        JsonArray unknownAdditional = new JsonArray();
         if (cost != null) {
             for (FactorDefinition definition : FACTORS) {
                 EconomicFactor factor = vector.factors().get(definition.key());
                 if (factor != null && factor.isNotApplicable()) {
                     excluded.add(definition.name());
                 } else if (factor == null || factor.isUnknown()) {
-                    if (definition.core()) {
-                        unknownCore.add(definition.name());
-                    } else {
-                        unknownAdditional.add(definition.name());
-                    }
+                    unknownCore.add(definition.name());
                 } else {
                     double weight = weights.getOrDefault(definition.key(), 0.0D);
                     rawWeightSum += weight;
@@ -464,15 +448,9 @@ public final class EconomicSnapshotDiagnosticReport {
         result.add("includedFactors", included);
         result.add("excludedNotApplicableFactors", excluded);
         result.add("unknownCoreFactors", unknownCore);
-        result.add("unknownAdditionalFactors", unknownAdditional);
         result.add("resolverMissingFactors", stringMap(cost == null ? Map.of() : cost.missingFactors()));
         result.add("resolverNotApplicableFactors", stringMap(
             cost == null ? Map.of() : cost.notApplicableFactors()));
-        if (cost == null) {
-            result.add("additionalCoverage", JsonNull.INSTANCE);
-        } else {
-            result.addProperty("additionalCoverage", cost.additionalCoverage());
-        }
         return result;
     }
 
@@ -611,10 +589,9 @@ public final class EconomicSnapshotDiagnosticReport {
 
     private static JsonObject policyAudit(List<PathObservation> observations, EconomicSnapshot snapshot,
         Map<String, Double> costWeights) {
-        List<Boolean> unknownAdditional = new ArrayList<>();
-        List<Boolean> knownAdditional = new ArrayList<>();
         List<Boolean> notApplicable = new ArrayList<>();
         List<Boolean> unknownCore = new ArrayList<>();
+        List<Boolean> durationExcluded = new ArrayList<>();
         List<Boolean> aggregateMatches = new ArrayList<>();
         for (PathObservation observation : observations) {
             if (observation.vector() == null || observation.acquisitionCost() == null) {
@@ -627,13 +604,6 @@ public final class EconomicSnapshotDiagnosticReport {
                 if (factor == null) {
                     continue;
                 }
-                if (!definition.core() && factor.isUnknown()) {
-                    unknownAdditional.add(!cost.normalizedFactors().containsKey(definition.key())
-                        && cost.missingFactors().containsKey(definition.key()));
-                }
-                if (!definition.core() && factor.isKnown()) {
-                    knownAdditional.add(cost.normalizedFactors().containsKey(definition.key()));
-                }
                 if (factor.isNotApplicable()) {
                     notApplicable.add(!cost.normalizedFactors().containsKey(definition.key())
                         && cost.notApplicableFactors().containsKey(definition.key()));
@@ -642,19 +612,18 @@ public final class EconomicSnapshotDiagnosticReport {
             if (!vector.unknownCoreFactors().isEmpty()) {
                 unknownCore.add(cost.status() == ResolutionStatus.UNKNOWN);
             }
+            durationExcluded.add(!vector.factors().containsKey("time_cost"));
             if (cost.status() != ResolutionStatus.UNKNOWN) {
                 aggregateMatches.add(aggregateMatches(vector, cost, costWeights));
             }
         }
 
         JsonObject result = new JsonObject();
-        result.addProperty("unknownAdditionalDoesNotBecomeZero", auditState(unknownAdditional));
-        result.addProperty("knownAdditionalParticipates", auditState(knownAdditional));
         result.addProperty("notApplicableExcluded", auditState(notApplicable));
         result.addProperty("unknownCoreBlocksAcquisitionCost", auditState(unknownCore));
-        Set<String> expectedWeightKeys = new HashSet<>();
-        expectedWeightKeys.addAll(CostVector.CORE_FACTORS);
-        expectedWeightKeys.addAll(CostVector.ADDITIONAL_FACTORS);
+        result.addProperty("operationDurationExcludedFromDefaultCost", auditState(durationExcluded));
+        Set<String> expectedWeightKeys = java.util.Arrays.stream(EconomicChannel.values())
+            .map(EconomicChannel::id).collect(java.util.stream.Collectors.toSet());
         result.addProperty("weightSourceIsCentralConfig",
             costWeights.keySet().equals(expectedWeightKeys) ? "PASS" : "FAIL");
         result.addProperty("weightSource", "DynamicFoodConfig.costFactorWeights()");

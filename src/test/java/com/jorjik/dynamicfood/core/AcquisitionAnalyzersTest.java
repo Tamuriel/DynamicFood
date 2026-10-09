@@ -3,6 +3,7 @@ package com.jorjik.dynamicfood.core;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -225,11 +226,12 @@ class AcquisitionAnalyzersTest {
         assertEquals("item per block-break loot invocation",
             stone.evidence().attributes().get("canonical_quantity_unit"));
         assertTrue(stone.costsByHorizon().get(100).factors().get("quantity_cost").isKnown());
-        EconomicFactor timeCost = stone.costsByHorizon().get(100).factors().get("time_cost");
-        assertTrue(timeCost.isUnknown(),
-            "a known block-break loot quantity does not establish the duration of breaking the block");
-        assertEquals("worldgen evidence does not measure block-break extraction duration in ticks",
-            timeCost.reason());
+        EconomicFactor probabilityBurden = stone.costsByHorizon().get(100)
+            .factor(EconomicChannel.PROBABILITY_BURDEN);
+        assertTrue(probabilityBurden.isUnknown(),
+            "worldgen source availability has no comparable opportunity unit or bounded normalization");
+        assertFalse(stone.costsByHorizon().get(100).factors().containsKey("time_cost"),
+            "operation duration remains diagnostic evidence, not an economic channel");
         assertTrue(stone.costsByHorizon().get(100).factors().get("equipment_cost").isUnknown());
         assertTrue(!stone.economicCost().isKnown());
 
@@ -311,7 +313,7 @@ class AcquisitionAnalyzersTest {
         assertEquals("false", discovered.evidence().attributes().get("worldgen_requires_correct_tool"));
         assertTrue(discovered.feasibilityFactors().get("equipment_availability").isNotApplicable());
         assertTrue(discovered.costsByHorizon().get(100).factors().get("equipment_cost").isNotApplicable());
-        assertTrue(discovered.costsByHorizon().get(100).factors().get("time_cost").isUnknown());
+        assertTrue(discovered.costsByHorizon().get(100).factor(EconomicChannel.PROBABILITY_BURDEN).isUnknown());
         assertTrue(!discovered.evidence().measurement("expected_units_per_attempt").isKnown(),
             "the conditional loot yield stays UNKNOWN even when ordinary-break availability is proven");
 
@@ -511,6 +513,65 @@ class AcquisitionAnalyzersTest {
             assertEquals(EstimateKind.UNKNOWN,
                 path.evidence().measurement("expected_units_per_attempt").estimateKind().orElseThrow());
         }
+    }
+
+    @Test
+    void providerRegistryResolvesMechanicsDeterministicallyAndOrderIndependently() {
+        MechanicProvider first = new MechanicProvider() {
+            @Override
+            public String providerId() {
+                return "provider-a";
+            }
+
+            @Override
+            public java.util.Collection<ProviderContribution> contributions() {
+                return List.of(
+                    new ProviderContribution("provider-a", "test:oak_log", ProviderContributionOperation.ADD,
+                        "worldgen", "minecraft:oak_log", Map.of("state", "minecraft:oak_log"), Map.of("source", "first")),
+                    new ProviderContribution("provider-a", "test:oak_log", ProviderContributionOperation.MODIFY,
+                        "worldgen", "minecraft:oak_log", Map.of("tool_required", "false"), Map.of("source", "first"))
+                );
+            }
+        };
+        MechanicProvider second = new MechanicProvider() {
+            @Override
+            public String providerId() {
+                return "provider-b";
+            }
+
+            @Override
+            public java.util.Collection<ProviderContribution> contributions() {
+                return List.of(
+                    new ProviderContribution("provider-b", "test:oak_log", ProviderContributionOperation.ADD,
+                        "worldgen", "minecraft:oak_log", Map.of("state", "minecraft:oak_log"), Map.of("source", "second"))
+                );
+            }
+        };
+
+        ProviderContributionRegistry registry = new ProviderContributionRegistry();
+        registry.register(second);
+        registry.register(first);
+
+        EffectiveMechanicModel model = registry.resolve();
+        assertEquals(Map.of("state", "minecraft:oak_log", "tool_required", "false"), model.mechanic("test:oak_log"));
+        assertTrue(model.conflicts().isEmpty());
+    }
+
+    @Test
+    void pathIdentityCanonicalizesEquivalentMechanicalPaths() {
+        AcquisitionPath first = new AcquisitionPath("minecraft:oak_log", "worldgen_feature", "minecraft:oak_log",
+            1.0D, null, null, true, false, Map.of(), Map.of());
+        AcquisitionPath second = new AcquisitionPath("minecraft:oak_log", "worldgen_feature", "minecraft:oak_log",
+            1.0D, null, null, true, false, Map.of(), Map.of());
+        var deduped = AcquisitionPathDeduplicator.deduplicate(List.of(first, second));
+
+        assertEquals(1, deduped.size());
+        assertEquals(PathIdentity.fromMechanicalIdentity(
+                "minecraft:oak_log", "worldgen_feature", "minecraft:oak_log",
+                AcquisitionRequirements.empty(), null, "default").canonicalKey(),
+            PathIdentity.fromMechanicalIdentity(
+                "minecraft:oak_log", "worldgen_feature", "minecraft:oak_log",
+                AcquisitionRequirements.empty(), null, "default").canonicalKey());
     }
 
     private static JsonObject json(String text) {

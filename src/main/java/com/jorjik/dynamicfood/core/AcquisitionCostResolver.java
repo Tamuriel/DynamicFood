@@ -15,7 +15,7 @@ public final class AcquisitionCostResolver {
             if (name == null || weight == null || !Double.isFinite(weight) || weight < 0.0D) {
                 throw new IllegalArgumentException("factor weights must be finite and non-negative");
             }
-            if (!CostVector.CORE_FACTORS.contains(name) && !CostVector.ADDITIONAL_FACTORS.contains(name)) {
+            if (EconomicChannel.fromId(name).isEmpty()) {
                 throw new IllegalArgumentException("unsupported economic policy factor: " + name);
             }
         });
@@ -28,7 +28,8 @@ public final class AcquisitionCostResolver {
             if (!Double.isFinite(weight) || weight < 0.0D) {
                 throw new IllegalArgumentException("factor weights must be finite and non-negative");
             }
-            EconomicFactor factor = vector.factors().get(entry.getKey());
+            EconomicFactor factor = EconomicChannel.fromId(entry.getKey())
+                .map(vector::factor).orElse(null);
             if (factor != null && factor.isNotApplicable()) {
                 notApplicable.put(entry.getKey(), factor.reason());
                 continue;
@@ -43,10 +44,9 @@ public final class AcquisitionCostResolver {
         }
         Map<String, String> unknownCore = vector.unknownCoreFactors();
         unknownCore.forEach(missing::putIfAbsent);
-        double additionalCoverage = vector.additionalCoverage(factorWeights);
         if (!unknownCore.isEmpty() || maxIncludedWeight <= 0.0D) {
             return new AcquisitionCost(null, ResolutionStatus.UNKNOWN, vector.economicHorizon(), used,
-                missing, notApplicable, additionalCoverage);
+                missing, notApplicable);
         }
         double weightedCost = 0.0D;
         double includedWeight = 0.0D;
@@ -56,6 +56,6 @@ public final class AcquisitionCostResolver {
             includedWeight += relativeWeight;
         }
         return new AcquisitionCost(weightedCost / includedWeight, ResolutionStatus.COMPLETE,
-            vector.economicHorizon(), used, missing, notApplicable, additionalCoverage);
+            vector.economicHorizon(), used, missing, notApplicable);
     }
 }

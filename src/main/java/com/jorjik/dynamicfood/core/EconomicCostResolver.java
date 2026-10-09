@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Map;
 
 public final class EconomicCostResolver {
-    public static final String POLICY_PRIMITIVE_ID = "dynamicfood:economic-policy-v1";
+    public static final String POLICY_PRIMITIVE_ID = "dynamicfood:economic-policy-v2";
 
     private EconomicCostResolver() {}
 
@@ -73,8 +73,7 @@ public final class EconomicCostResolver {
                 continue;
             }
             EconomicCost target = EconomicCost.known(acquisitionCost.cost(), POLICY_PRIMITIVE_ID, horizon,
-                "policy-defined scalar promoted from AcquisitionCost for path " + path.sourceId()
-                    + "; additional factor coverage=" + acquisitionCost.additionalCoverage());
+                "policy-defined scalar promoted from AcquisitionCost for path " + path.sourceId());
             eligible.add(new ResolvedPath(path, feasibility, acquisitionCost, target));
         }
 

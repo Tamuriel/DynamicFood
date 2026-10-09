@@ -2,123 +2,112 @@ package com.jorjik.dynamicfood.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.jorjik.dynamicfood.config.DynamicFoodConfig;
 import com.jorjik.dynamicfood.graph.AcquisitionIngredient;
 import com.jorjik.dynamicfood.graph.RecipeGraph;
 import com.jorjik.dynamicfood.graph.RecipeNode;
-import java.util.LinkedHashMap;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class AcquisitionCostPolicyTest {
     @Test
-    void coreCompletenessDoesNotDependOnAdditionalCoverage() {
-        CostVector vector = vector(EconomicFactor.known(0.2D), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.notApplicable("not used"), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.unknown("not measured"));
+    void applicableUnknownProbabilityBurdenBlocksCoreCost() {
+        CostVector vector = vector(EconomicFactor.known(0.2D),
+            EconomicFactor.unknown("no bounded probability normalization"),
+            EconomicFactor.notApplicable("no input materials"), EconomicFactor.notApplicable("no equipment"));
 
-        AcquisitionCost cost = AcquisitionCostResolver.resolve(vector, weights(1.0D, 1.0D));
-
-        assertTrue(vector.isCoreComplete());
-        assertEquals(ResolutionStatus.COMPLETE, cost.status());
-        assertEquals(0.2D, cost.cost(), 0.0D);
-        assertEquals(0.0D, cost.additionalCoverage(), 0.0D);
-        assertTrue(cost.missingFactors().containsKey("resource_consumption_cost"));
-    }
-
-    @Test
-    void unknownCorePreventsNumericCostAndIsNotTreatedAsZero() {
-        CostVector vector = vector(EconomicFactor.known(0.2D), EconomicFactor.unknown("time unavailable"),
-            EconomicFactor.notApplicable("not used"), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.notApplicable("not used"));
-
-        AcquisitionCost cost = AcquisitionCostResolver.resolve(vector, weights(1.0D, 1.0D));
+        AcquisitionCost cost = AcquisitionCostResolver.resolve(vector, unitWeights());
 
         assertFalse(vector.isCoreComplete());
         assertEquals(ResolutionStatus.UNKNOWN, cost.status());
         assertEquals(null, cost.cost());
-        assertTrue(cost.missingFactors().containsKey("time_cost"));
+        assertEquals("no bounded probability normalization",
+            cost.missingFactors().get(EconomicChannel.PROBABILITY_BURDEN.id()));
     }
 
     @Test
-    void knownAdditionalFactorParticipatesButNotApplicableDoesNot() {
-        CostVector vector = vector(EconomicFactor.known(0.2D), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.notApplicable("not used"), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.known(0.8D));
-        Map<String, Double> allWeights = weights(1.0D, 1.0D);
+    void notApplicableCoreChannelsDoNotBlockCompleteness() {
+        CostVector vector = vector(EconomicFactor.known(0.2D),
+            EconomicFactor.notApplicable("selection is represented by expected quantity"),
+            EconomicFactor.notApplicable("no input materials"), EconomicFactor.notApplicable("no equipment"));
 
-        AcquisitionCost both = AcquisitionCostResolver.resolve(vector, allWeights);
-        AcquisitionCost coreOnly = AcquisitionCostResolver.resolve(vector, weights(1.0D, 0.0D));
+        AcquisitionCost cost = AcquisitionCostResolver.resolve(vector, unitWeights());
 
-        assertEquals(0.5D, both.cost(), 0.0D);
-        assertEquals(0.2D, coreOnly.cost(), 0.0D);
-        assertTrue(both.notApplicableFactors().containsKey("time_cost"));
+        assertTrue(vector.isCoreComplete());
+        assertEquals(ResolutionStatus.COMPLETE, cost.status());
+        assertEquals(0.2D, cost.cost(), 0.0D);
+        assertTrue(cost.notApplicableFactors().containsKey(EconomicChannel.PROBABILITY_BURDEN.id()));
     }
 
     @Test
-    void knownZeroAndZeroWeightRemainDistinctFromNotApplicable() {
-        CostVector vector = vector(EconomicFactor.known(0.0D), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.notApplicable("not used"), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.notApplicable("not used"));
-        AcquisitionCost included = AcquisitionCostResolver.resolve(vector, weights(1.0D, 0.0D));
-        AcquisitionCost zeroWeight = AcquisitionCostResolver.resolve(vector, weights(0.0D, 0.0D));
-
-        assertEquals(0.0D, included.cost(), 0.0D);
-        assertTrue(included.normalizedFactors().containsKey("quantity_cost"));
-        assertEquals(ResolutionStatus.UNKNOWN, zeroWeight.status());
-        assertTrue(zeroWeight.normalizedFactors().containsKey("quantity_cost"));
-        assertFalse(zeroWeight.notApplicableFactors().containsKey("quantity_cost"));
+    void diagnosticDurationCannotEnterCostVectorOrDefaultAggregation() {
+        assertThrows(IllegalArgumentException.class, () -> new CostVector(100,
+            Map.of("time_cost", EconomicFactor.unknown("duration is diagnostic"))));
+        assertThrows(IllegalArgumentException.class, () -> AcquisitionCostResolver.resolve(
+            vector(EconomicFactor.known(0.2D), EconomicFactor.notApplicable("none"),
+                EconomicFactor.notApplicable("none"), EconomicFactor.notApplicable("none")),
+            Map.of("time_cost", 1.0D)));
     }
 
     @Test
-    void deterministicWeightedAggregateChangesWithConfiguredWeights() {
-        CostVector vector = vector(EconomicFactor.known(0.2D), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.notApplicable("not used"), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.known(0.8D));
-
-        AcquisitionCost quantityEmphasis = AcquisitionCostResolver.resolve(vector, weights(3.0D, 1.0D));
-        AcquisitionCost materialEmphasis = AcquisitionCostResolver.resolve(vector, weights(1.0D, 3.0D));
-        AcquisitionCost repeated = AcquisitionCostResolver.resolve(vector, weights(3.0D, 1.0D));
-
-        assertEquals(0.35D, quantityEmphasis.cost(), 1.0E-15D);
-        assertEquals(0.65D, materialEmphasis.cost(), 1.0E-15D);
-        assertEquals(quantityEmphasis, repeated);
+    void structuralFactorsCannotEnterCostVectorOrDefaultAggregation() {
+        assertThrows(IllegalArgumentException.class, () -> new CostVector(100,
+            Map.of("resource_consumption_cost", EconomicFactor.known(0.8D))));
+        assertThrows(IllegalArgumentException.class, () -> AcquisitionCostResolver.resolve(
+            vector(EconomicFactor.known(0.2D), EconomicFactor.notApplicable("none"),
+                EconomicFactor.notApplicable("none"), EconomicFactor.notApplicable("none")),
+            Map.of("progression_cost", 1.0D)));
     }
 
     @Test
-    void centralConfigurationProvidesWeightsForEveryPolicyFactor() {
+    void knownZeroRemainsDistinctFromNotApplicable() {
+        CostVector vector = vector(EconomicFactor.known(0.0D),
+            EconomicFactor.notApplicable("no separate probability burden"),
+            EconomicFactor.notApplicable("no input materials"), EconomicFactor.notApplicable("no equipment"));
+
+        AcquisitionCost cost = AcquisitionCostResolver.resolve(vector, unitWeights());
+
+        assertEquals(0.0D, cost.cost(), 0.0D);
+        assertTrue(cost.normalizedFactors().containsKey(EconomicChannel.QUANTITY.id()));
+        assertFalse(cost.notApplicableFactors().containsKey(EconomicChannel.QUANTITY.id()));
+    }
+
+    @Test
+    void deterministicWeightedAggregateUsesOnlyCanonicalChannels() {
+        CostVector vector = vector(EconomicFactor.known(0.2D), EconomicFactor.notApplicable("no independent burden"),
+            EconomicFactor.known(0.8D), EconomicFactor.notApplicable("no equipment"));
+        Map<String, Double> quantityEmphasis = Map.of(
+            EconomicChannel.QUANTITY.id(), 3.0D,
+            EconomicChannel.PROBABILITY_BURDEN.id(), 1.0D,
+            EconomicChannel.MATERIAL_CONSUMPTION.id(), 1.0D,
+            EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN.id(), 1.0D);
+        Map<String, Double> materialEmphasis = Map.of(
+            EconomicChannel.QUANTITY.id(), 1.0D,
+            EconomicChannel.PROBABILITY_BURDEN.id(), 1.0D,
+            EconomicChannel.MATERIAL_CONSUMPTION.id(), 3.0D,
+            EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN.id(), 1.0D);
+
+        AcquisitionCost first = AcquisitionCostResolver.resolve(vector, quantityEmphasis);
+        AcquisitionCost second = AcquisitionCostResolver.resolve(vector, materialEmphasis);
+
+        assertEquals(0.35D, first.cost(), 1.0E-15D);
+        assertEquals(0.65D, second.cost(), 1.0E-15D);
+        assertEquals(first, AcquisitionCostResolver.resolve(vector, quantityEmphasis));
+    }
+
+    @Test
+    void centralConfigurationExposesExactlyCanonicalChannels() {
         Map<String, Double> configured = DynamicFoodConfig.costFactorWeights();
 
-        assertEquals(CostVector.CORE_FACTORS.size() + CostVector.ADDITIONAL_FACTORS.size(), configured.size());
-        assertTrue(configured.keySet().containsAll(CostVector.CORE_FACTORS));
-        assertTrue(configured.keySet().containsAll(CostVector.ADDITIONAL_FACTORS));
-        assertTrue(configured.values().stream().allMatch(weight ->
-            Double.isFinite(weight) && weight >= 0.0D));
-    }
-
-    @Test
-    void eligiblePathWithUnknownAdditionalFactorRemainsSelectable() {
-        CostVector vector = vector(EconomicFactor.known(0.2D), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.notApplicable("not used"), EconomicFactor.notApplicable("not used"),
-            EconomicFactor.unknown("resource consumption is not measured"));
-        AcquisitionPath path = new AcquisitionPath("test:resource", "recipe", "test:source", 1.0D,
-            null, null, true, false, Map.of("reliability", EconomicFactor.known(1.0D)),
-            Map.of(100, vector), new AcquisitionEvidence(Map.of(),
-                Map.of("source_availability_classification", "TRUE")),
-            EconomicCost.unknown("resolved from CostVector"));
-
-        EconomicCostResolution result = EconomicCostResolver.resolve("test:resource", List.of(path), 100,
-            PrimaryPathStrategy.BEST_REPEATABLE_COST, Map.of("reliability", 1.0D),
-            Map.of("quantity_cost", 1.0D, "time_cost", 1.0D, "material_cost", 1.0D,
-                "equipment_cost", 1.0D, "resource_consumption_cost", 1.0D),
-            0.0D, 1.0D, false);
-
-        assertEquals(ResolutionStatus.COMPLETE, result.status());
-        assertEquals(0.2D, result.economicCost(), 0.0D);
-        assertEquals("test:source", result.primaryPath().sourceId());
+        assertEquals(List.of(EconomicChannel.values()).size(), configured.size());
+        assertTrue(configured.keySet().containsAll(
+            java.util.Arrays.stream(EconomicChannel.values()).map(EconomicChannel::id).toList()));
+        assertTrue(configured.values().stream().allMatch(weight -> Double.isFinite(weight) && weight >= 0.0D));
     }
 
     @Test
@@ -129,29 +118,31 @@ class AcquisitionCostPolicyTest {
             List.of(new AcquisitionIngredient(List.of("test:child"), 1)));
         graph.add(recipe);
         EconomicCostEvidenceProvider child = (itemId, horizon) -> "test:child".equals(itemId)
-            ? EconomicCost.known(0.25D, "dynamicfood:economic-policy-v1", horizon, "child policy cost")
+            ? EconomicCost.known(0.25D, "dynamicfood:economic-policy-v2", horizon, "child policy cost")
             : EconomicCost.unknown("missing child economics");
 
         AcquisitionPath path = new RecipeGraphAcquisitionAnalyzer(graph, child, 1.0D, 100.0D)
             .analyze("test:output").getFirst();
 
         assertEquals(0.25D,
-            path.costsByHorizon().get(100).factors().get("material_cost").value(), 0.0D);
+            path.costsByHorizon().get(100).factor(EconomicChannel.MATERIAL_CONSUMPTION).value(), 0.0D);
     }
 
-    private static CostVector vector(EconomicFactor quantity, EconomicFactor time, EconomicFactor material,
-        EconomicFactor equipment, EconomicFactor resourceConsumption) {
-        Map<String, EconomicFactor> factors = new LinkedHashMap<>();
-        factors.put("quantity_cost", quantity);
-        factors.put("time_cost", time);
-        factors.put("material_cost", material);
-        factors.put("equipment_cost", equipment);
-        factors.put("resource_consumption_cost", resourceConsumption);
+    private static CostVector vector(EconomicFactor quantity, EconomicFactor probability,
+        EconomicFactor material, EconomicFactor equipment) {
+        Map<EconomicChannel, EconomicFactor> factors = new EnumMap<>(EconomicChannel.class);
+        factors.put(EconomicChannel.QUANTITY, quantity);
+        factors.put(EconomicChannel.PROBABILITY_BURDEN, probability);
+        factors.put(EconomicChannel.MATERIAL_CONSUMPTION, material);
+        factors.put(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN, equipment);
         return new CostVector(100, factors);
     }
 
-    private static Map<String, Double> weights(double quantity, double resourceConsumption) {
-        return Map.of("quantity_cost", quantity, "time_cost", 1.0D,
-            "resource_consumption_cost", resourceConsumption);
+    private static Map<String, Double> unitWeights() {
+        return Map.of(
+            EconomicChannel.QUANTITY.id(), 1.0D,
+            EconomicChannel.PROBABILITY_BURDEN.id(), 1.0D,
+            EconomicChannel.MATERIAL_CONSUMPTION.id(), 1.0D,
+            EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN.id(), 1.0D);
     }
 }

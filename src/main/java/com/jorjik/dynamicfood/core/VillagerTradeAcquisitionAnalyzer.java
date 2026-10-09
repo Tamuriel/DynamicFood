@@ -111,30 +111,18 @@ public final class VillagerTradeAcquisitionAnalyzer implements AcquisitionAnalyz
             return List.of();
         }
         return outputs.stream().map(output -> {
-            Map<String, EconomicFactor> costs = new HashMap<>();
+            Map<EconomicChannel, EconomicFactor> costs = new java.util.EnumMap<>(EconomicChannel.class);
             Map<Integer, CostVector> horizons = new HashMap<>();
             for (int horizon : supportedHorizons()) {
                 EconomicFactor materialCost = materialCost(output);
                 costs.clear();
-                costs.put("quantity_cost", FactorNormalizer.quantityCostForHorizon(output.outputCount(),
+                costs.put(EconomicChannel.QUANTITY, FactorNormalizer.quantityCostForHorizon(output.outputCount(),
                     horizon, DynamicFoodConfig.lootAttemptsReference(), DynamicFoodConfig.lootAttemptsCap()));
-                costs.put("time_cost", EconomicFactor.unknown("trade data does not expose time per completed offer"));
-                costs.put("prerequisite_cost", EconomicFactor.unknown(
-                    "profession and workstation access costs are not resolved"));
-                costs.put("progression_cost", output.level() == 1
-                    ? EconomicFactor.unknown("profession access requirements are not resolved")
-                    : EconomicFactor.unknown("villager level is known but its leveling costs are not resolved"));
-                costs.put("equipment_cost", EconomicFactor.unknown(
+                costs.put(EconomicChannel.PROBABILITY_BURDEN, EconomicFactor.notApplicable(
+                    "trade output quantity is deterministic; no independent probability burden is evidenced"));
+                costs.put(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN, EconomicFactor.unknown(
                     "villager workstation acquisition cost is not resolved"));
-                costs.put("danger_cost", EconomicFactor.unknown(
-                    "villager location and protection requirements are not resolved"));
-                costs.put("transport_cost", EconomicFactor.unknown(
-                    "villager and input travel distance are not resolved"));
-                costs.put("intermediate_cost", EconomicFactor.notApplicable(
-                    "trade input economics are represented by material_cost"));
-                costs.put("resource_consumption_cost", EconomicFactor.notApplicable(
-                    "consumed trade input quantities are represented by material_cost"));
-                costs.put("material_cost", materialCost);
+                costs.put(EconomicChannel.MATERIAL_CONSUMPTION, materialCost);
                 horizons.put(horizon, new CostVector(horizon, costs));
             }
             EconomicFactor quantity = FactorNormalizer.quantityCostForHorizon(output.outputCount(), 1,

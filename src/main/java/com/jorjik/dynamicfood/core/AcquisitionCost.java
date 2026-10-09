@@ -9,18 +9,11 @@ public record AcquisitionCost(
     int economicHorizon,
     Map<String, Double> normalizedFactors,
     Map<String, String> missingFactors,
-    Map<String, String> notApplicableFactors,
-    double additionalCoverage
+    Map<String, String> notApplicableFactors
 ) {
     public AcquisitionCost(Double cost, ResolutionStatus status, int economicHorizon,
         Map<String, Double> normalizedFactors, Map<String, String> missingFactors) {
-        this(cost, status, economicHorizon, normalizedFactors, missingFactors, Map.of(), 1.0D);
-    }
-
-    public AcquisitionCost(Double cost, ResolutionStatus status, int economicHorizon,
-        Map<String, Double> normalizedFactors, Map<String, String> missingFactors,
-        Map<String, String> notApplicableFactors) {
-        this(cost, status, economicHorizon, normalizedFactors, missingFactors, notApplicableFactors, 1.0D);
+        this(cost, status, economicHorizon, normalizedFactors, missingFactors, Map.of());
     }
 
     public AcquisitionCost {
@@ -29,9 +22,8 @@ public record AcquisitionCost(
         } else if (cost == null || !Double.isFinite(cost) || cost < 0.0D || cost > 1.0D) {
             throw new IllegalArgumentException("resolved AcquisitionCost must be finite and in [0,1]");
         }
-        if (economicHorizon < 1 || !Double.isFinite(additionalCoverage)
-            || additionalCoverage < 0.0D || additionalCoverage > 1.0D) {
-            throw new IllegalArgumentException("economic horizon must be positive and additional coverage in [0,1]");
+        if (economicHorizon < 1) {
+            throw new IllegalArgumentException("economic horizon must be positive");
         }
         normalizedFactors = Map.copyOf(normalizedFactors);
         missingFactors = Map.copyOf(missingFactors);

@@ -59,7 +59,7 @@ class RecipeEconomicAnalyzerTest {
             Map.of("reliability", EconomicFactor.known(1.0D)), Map.of());
         Map<String, EconomicFactor> factors = new java.util.LinkedHashMap<>();
         factors.put("quantity_cost", EconomicFactor.known(0.7D));
-        factors.put("time_cost", EconomicFactor.notApplicable("not modeled"));
+        factors.put("probability_burden", EconomicFactor.notApplicable("no independent probability burden"));
         factors.put("material_cost", EconomicFactor.notApplicable("not modeled"));
         factors.put("equipment_cost", EconomicFactor.notApplicable("not modeled"));
         AcquisitionPath known = new AcquisitionPath("test:resource", "loot", "test:known",
