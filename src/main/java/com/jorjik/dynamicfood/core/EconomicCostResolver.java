@@ -36,7 +36,7 @@ public final class EconomicCostResolver {
         }
         List<AcquisitionPath> itemPaths = paths.stream()
             .filter(path -> path.itemId().equals(itemId))
-            .sorted(Comparator.comparing(AcquisitionPath::sourceId))
+            .sorted(EconomicSnapshotBuilder.PATH_ORDER)
             .toList();
         List<ResolvedPath> eligible = new ArrayList<>();
         List<String> reasons = new ArrayList<>();
@@ -47,6 +47,12 @@ public final class EconomicCostResolver {
                 incompleteCoverage |= survival == null || !"FALSE".equalsIgnoreCase(survival);
                 reasons.add(path.sourceId() + ": excluded because survival availability is "
                     + (survival == null ? "UNKNOWN" : survival));
+                continue;
+            }
+            if ("CONFLICT".equals(path.evidence().attributes()
+                .get("acquisition_path_deduplication_status"))) {
+                reasons.add(path.sourceId() + ": excluded because duplicate-path evidence is CONFLICT");
+                incompleteCoverage = true;
                 continue;
             }
             FeasibilityResult feasibility = FeasibilityResolver.resolve(path, feasibilityWeights,

@@ -11,6 +11,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
@@ -23,6 +24,9 @@ import net.minecraft.world.level.block.CropBlock;
 
 public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
     private static final String EXPECTED_VALUE_EVALUATOR_VERSION = "minecraft-loot-expected-value-v1";
+    private static final String UNKNOWN_LOOT_YIELD_REASON =
+        "candidate item outputs were identified, but unsupported or conditional loot semantics prevent "
+            + "a defensible expected-yield calculation";
     private final Map<String, List<LootSource>> sourcesByItem;
     private final Map<String, List<ItemLootSource>> sourcesByTable;
     private final double attemptsReference;
@@ -70,11 +74,17 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                     sources.computeIfAbsent(itemId, ignored -> new ArrayList<>())
                         .add(new LootSource(table.tableId(), table.sourceType(), expectedUnits,
                             table.evidenceByItem().get(itemId),
-                            table.ordinaryPlayerBreakOutputs().contains(itemId))));
+                            outputPossibility(expectedUnits, table.provenPossibleItems().contains(itemId)),
+                            table.ordinaryPlayerBreakOutputs().contains(itemId),
+                            table.ordinaryPlayerBreakRequiresCorrectTool())));
                 table.unknownItems().stream().sorted().forEach(itemId ->
                     sources.computeIfAbsent(itemId, ignored -> new ArrayList<>())
                         .add(new LootSource(table.tableId(), table.sourceType(), null, null,
-                            table.ordinaryPlayerBreakOutputs().contains(itemId))));
+                            table.provenPossibleItems().contains(itemId)
+                                ? OutputPossibilityStatus.PROVEN_POSSIBLE
+                                : OutputPossibilityStatus.UNKNOWN_CANDIDATE,
+                            table.ordinaryPlayerBreakOutputs().contains(itemId),
+                            table.ordinaryPlayerBreakRequiresCorrectTool())));
             });
         Map<String, List<LootSource>> frozen = new HashMap<>();
         sources.forEach((itemId, values) -> frozen.put(itemId, values.stream()
@@ -107,13 +117,14 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
             Map<Integer, CostVector> unknownHorizons = new HashMap<>();
             for (int horizon : supportedHorizons()) {
                 unknownHorizons.put(horizon, lootCostVector(horizon,
-                    EconomicFactor.unknown("conditional or function-based loot yield is not statically measurable"),
-                    null, null));
+                    EconomicFactor.unknown(UNKNOWN_LOOT_YIELD_REASON),
+                    source.ordinaryPlayerBreakOutput(), source.requiresCorrectTool()));
             }
             Map<String, AcquisitionMeasurement> unknownEvidence = new HashMap<>(Map.of(
-                "probability", AcquisitionMeasurement.unknown("loot conditions or weighted selection are not evaluated"),
-                "expected_yield_on_success", AcquisitionMeasurement.unknown("loot functions or conditions are not evaluated"),
-                "expected_units_per_attempt", AcquisitionMeasurement.unknown("loot functions or conditions are not evaluated"),
+                "probability", AcquisitionMeasurement.unknown(
+                    "loot conditions or alternative-entry selection are not resolved"),
+                "expected_yield_on_success", AcquisitionMeasurement.unknown(UNKNOWN_LOOT_YIELD_REASON),
+                "expected_units_per_attempt", AcquisitionMeasurement.unknown(UNKNOWN_LOOT_YIELD_REASON),
                 "expected_attempts_per_unit", AcquisitionMeasurement.unknown("expected yield is unknown")
             ));
             for (int horizon : supportedHorizons()) {
@@ -125,7 +136,7 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 null, null, null, false,
                 lootFeasibilityFactors(
                     EconomicFactor.unknown("loot conditions are not evaluated"),
-                    EconomicFactor.unknown("loot functions or conditions are not evaluated"), false),
+                    EconomicFactor.unknown("loot functions or conditions are not evaluated"), false, source),
                 unknownHorizons, new AcquisitionEvidence(unknownEvidence, lootAttributes(source)));
         }
         LootEvidence loot = source.evidence();
@@ -136,14 +147,13 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
             ? EconomicFactor.unknown("conditional loot yield is not available")
             : EconomicFactor.known(Math.min(1.0D, loot.expectedYieldOnSuccess()));
         Map<String, EconomicFactor> feasibility = new HashMap<>();
-        feasibility.putAll(lootFeasibilityFactors(probability, yield, true));
+        feasibility.putAll(lootFeasibilityFactors(probability, yield, true, source));
         Map<Integer, CostVector> horizons = new HashMap<>();
         for (int horizon : supportedHorizons()) {
             horizons.put(horizon, lootCostVector(horizon,
                 FactorNormalizer.quantityCostForHorizon(source.expectedUnitsPerAttempt(), horizon,
                     attemptsReference, attemptsCap),
-                loot == null ? null : loot.probability(),
-                loot == null ? null : loot.expectedYieldOnSuccess()));
+                source.ordinaryPlayerBreakOutput(), source.requiresCorrectTool()));
         }
         Map<String, AcquisitionMeasurement> measurements = new HashMap<>(Map.of(
             "probability", loot == null
@@ -173,15 +183,25 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
     }
 
     private CostVector lootCostVector(int horizon, EconomicFactor quantity,
-        Double probability, Double expectedYield) {
+        boolean ordinaryPlayerBreakOutput, Boolean requiresCorrectTool) {
         Map<EconomicChannel, EconomicFactor> factors = new java.util.EnumMap<>(EconomicChannel.class);
         factors.put(EconomicChannel.QUANTITY, quantity);
         factors.put(EconomicChannel.PROBABILITY_BURDEN, EconomicFactor.notApplicable(
             "loot selection probability is represented by canonical expected quantity"));
-        factors.put(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN, EconomicFactor.unknown(
-            "required tools or equipment are not represented by loot output data"));
-        factors.put(EconomicChannel.MATERIAL_CONSUMPTION, EconomicFactor.unknown(
-            "source-specific inputs are not represented by loot output data"));
+        factors.put(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN,
+            ordinaryPlayerBreakOutput && Boolean.FALSE.equals(requiresCorrectTool)
+                ? EconomicFactor.notApplicable(
+                    "registered block does not require a correct tool for drops; optional tools that only improve "
+                        + "speed are outside the equipment requirement burden")
+                : EconomicFactor.unknown(ordinaryPlayerBreakOutput && Boolean.TRUE.equals(requiresCorrectTool)
+                    ? "registered block requires a correct tool, but its acquisition and replacement cost are "
+                        + "unresolved"
+                    : "required tools or equipment are not represented by loot output data"));
+        factors.put(EconomicChannel.MATERIAL_CONSUMPTION,
+            ordinaryPlayerBreakOutput
+                ? EconomicFactor.notApplicable(
+                    "ordinary block breaking consumes no separate player material input")
+                : EconomicFactor.unknown("source-specific inputs are not represented by loot output data"));
         return new CostVector(horizon, factors);
     }
 
@@ -229,7 +249,8 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
     }
 
     private static Map<String, EconomicFactor> lootFeasibilityFactors(
-        EconomicFactor probability, EconomicFactor expectedYield, boolean canonicalQuantityKnown) {
+        EconomicFactor probability, EconomicFactor expectedYield, boolean canonicalQuantityKnown,
+        LootSource source) {
         return Map.ofEntries(
             Map.entry("probability", canonicalQuantityKnown
                 ? EconomicFactor.notApplicable("probability is already represented by expected units per attempt")
@@ -255,16 +276,35 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 "source consumables are not represented in loot data")),
             Map.entry("intermediate_steps", EconomicFactor.notApplicable(
                 "loot output generation has no recursive recipe step")),
-            Map.entry("equipment_availability", EconomicFactor.unknown(
-                "source equipment requirements are not represented in loot data")),
+            Map.entry("equipment_availability", lootEquipmentAvailability(source)),
             Map.entry("reliability", EconomicFactor.known(1.0D))
         );
+    }
+
+    private static EconomicFactor lootEquipmentAvailability(LootSource source) {
+        if (!source.sourceType().equals("block_loot") || !source.ordinaryPlayerBreakOutput()) {
+            return EconomicFactor.unknown("source equipment requirements are not represented in loot data");
+        }
+        if (Boolean.FALSE.equals(source.requiresCorrectTool())) {
+            return EconomicFactor.notApplicable(
+                "registered block state proves that no correct tool is required for drops");
+        }
+        return EconomicFactor.unknown(Boolean.TRUE.equals(source.requiresCorrectTool())
+            ? "registered block requires a correct tool, but player access to that equipment is unresolved"
+            : "registered block correct-tool requirement is not exposed");
     }
 
     private static Map<String, String> lootAttributes(LootSource source) {
         Map<String, String> attributes = new HashMap<>();
         attributes.put("loot_table", source.tableId());
         attributes.put("source_type", source.sourceType());
+        attributes.put("loot_output_evidence_status", source.outputPossibility().name());
+        attributes.put("loot_output_evidence_reason", source.outputPossibilityReason());
+        attributes.put("loot_analysis_category", source.expectedUnitsPerAttempt() == null
+            ? "YIELD_UNKNOWN" : "EXPECTED_YIELD_ANALYZED");
+        attributes.put("loot_analysis_reason", source.expectedUnitsPerAttempt() == null
+            ? UNKNOWN_LOOT_YIELD_REASON
+            : "expected item yield was derived by the supported loot expected-value evaluator");
         attributes.put("canonical_quantity_source", "expected_units_per_attempt");
         attributes.put("canonical_quantity_unit", "item per loot-table invocation");
         attributes.put("canonical_quantity_semantics",
@@ -278,6 +318,14 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         attributes.put("ordinary_player_break_output_reason", source.ordinaryPlayerBreakOutput()
             ? "registered block loot has one direct block-item entry, one ordinary roll, and no non-explosion condition or function"
             : "ordinary player block-break output is not established by the supported direct-drop loot pattern");
+        if (source.ordinaryPlayerBreakOutput()) {
+            attributes.put("ordinary_player_break_requires_correct_tool",
+                source.requiresCorrectTool() == null ? "UNKNOWN" : source.requiresCorrectTool().toString());
+            attributes.put("ordinary_player_break_tool_requirement_reason",
+                source.requiresCorrectTool() == null
+                    ? "registered blocks sharing this loot table do not establish one unambiguous tool requirement"
+                    : "tool requirement was resolved from registered blocks referencing this loot table");
+        }
         ResourceLocation tableId = ResourceLocation.tryParse(source.tableId());
         if (tableId == null) {
             return Map.copyOf(attributes);
@@ -335,6 +383,8 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         try (var reader = resource.openAsReader()) {
             JsonElement parsed = JsonParser.parseReader(reader);
             if (!parsed.isJsonObject()) {
+                logIndexFailure(resourceId, "MALFORMED_ROOT",
+                    "loot-table JSON root must be an object", null);
                 return Optional.empty();
             }
             String tablePath = resourceId.getPath().substring(0,
@@ -344,10 +394,30 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
             }
             String tableId = resourceId.getNamespace() + ":" + tablePath;
             return parseTable(tableId, parsed.getAsJsonObject());
-        } catch (IOException | RuntimeException exception) {
-            com.jorjik.dynamicfood.DynamicFood.LOGGER.warn("Unable to index loot table {} for acquisition analysis",
-                resourceId, exception);
+        } catch (IOException exception) {
+            logIndexFailure(resourceId, "RESOURCE_READ_FAILURE",
+                "loot-table resource could not be read: " + exception.getMessage(), exception);
             return Optional.empty();
+        } catch (com.google.gson.JsonParseException exception) {
+            logIndexFailure(resourceId, "MALFORMED_JSON",
+                "loot-table resource is not valid JSON: " + exception.getMessage(), exception);
+            return Optional.empty();
+        } catch (RuntimeException exception) {
+            logIndexFailure(resourceId, "PARSER_FAILURE",
+                "loot-table indexing failed (" + exception.getClass().getSimpleName() + "): "
+                    + Objects.toString(exception.getMessage(), "no exception message"), exception);
+            return Optional.empty();
+        }
+    }
+
+    private static void logIndexFailure(ResourceLocation resourceId, String category, String reason,
+        Throwable exception) {
+        if (exception == null) {
+            com.jorjik.dynamicfood.DynamicFood.LOGGER.warn(
+                "Unable to index loot table {} [category={}]: {}", resourceId, category, reason);
+        } else {
+            com.jorjik.dynamicfood.DynamicFood.LOGGER.warn(
+                "Unable to index loot table {} [category={}]: {}", resourceId, category, reason, exception);
         }
     }
 
@@ -392,8 +462,155 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
             parsed = new ParsedTable(tableId, sourceType(ResourceLocation.parse(tableId)),
                 Map.of(), possibleItems);
         }
-        return Optional.of(parsed.withOrdinaryPlayerBreakOutputs(
-            ordinaryPlayerBreakOutputs(tableId, root)));
+        Set<String> provenPossibleItems = new TreeSet<>(parsed.expectedUnitsByItem().entrySet().stream()
+            .filter(entry -> Double.isFinite(entry.getValue()) && entry.getValue() > 0.0D)
+            .map(Map.Entry::getKey).toList());
+        provenPossibleItems.addAll(provenSetCountOutputs(root));
+        parsed = parsed.withProvenPossibleItems(provenPossibleItems);
+        Set<String> ordinaryOutputs = ordinaryPlayerBreakOutputs(tableId, root);
+        Boolean requiresCorrectTool = ordinaryOutputs.isEmpty()
+            ? null : ordinaryPlayerBreakRequiresCorrectTool(tableId);
+        return Optional.of(parsed.withOrdinaryPlayerBreakOutputs(ordinaryOutputs, requiresCorrectTool));
+    }
+
+    private static Set<String> provenSetCountOutputs(JsonObject root) {
+        if (root.has("neoforge:conditions") || hasEntries(root, "functions")
+            || root.entrySet().stream().anyMatch(entry -> !Set.of("type", "pools").contains(entry.getKey()))) {
+            return Set.of();
+        }
+        JsonArray pools = jsonArray(root, "pools");
+        if (pools == null || pools.size() != 1 || !pools.get(0).isJsonObject()) {
+            return Set.of();
+        }
+        JsonObject pool = pools.get(0).getAsJsonObject();
+        if (pool.entrySet().stream().anyMatch(entry ->
+                !Set.of("rolls", "bonus_rolls", "conditions", "functions", "entries").contains(entry.getKey()))
+            || hasEntries(pool, "functions")
+            || hasEntries(pool, "conditions")
+            || exactNumber(pool.get("rolls"), 1.0D).orElse(Double.NaN) != 1.0D
+            || exactNumber(pool.get("bonus_rolls"), 0.0D).orElse(Double.NaN) != 0.0D) {
+            return Set.of();
+        }
+        JsonArray entries = jsonArray(pool, "entries");
+        if (entries == null || entries.size() != 1 || !entries.get(0).isJsonObject()) {
+            return Set.of();
+        }
+        JsonObject entry = entries.get(0).getAsJsonObject();
+        OptionalDouble weight = exactNumber(entry.get("weight"), 1.0D);
+        OptionalDouble quality = exactNumber(entry.get("quality"), 0.0D);
+        if (!"minecraft:item".equals(string(entry, "type"))
+            || entry.entrySet().stream().anyMatch(field ->
+                !Set.of("type", "name", "weight", "quality", "conditions", "functions").contains(field.getKey()))
+            || hasEntries(entry, "conditions")
+            || weight.isEmpty() || !Double.isFinite(weight.getAsDouble()) || weight.getAsDouble() <= 0.0D
+            || quality.isEmpty() || quality.getAsDouble() != 0.0D) {
+            return Set.of();
+        }
+        JsonArray functions = jsonArray(entry, "functions");
+        if (functions == null || functions.size() != 1 || !functions.get(0).isJsonObject()) {
+            return Set.of();
+        }
+        JsonObject function = functions.get(0).getAsJsonObject();
+        JsonElement addValue = function.get("add");
+        boolean additiveCount = addValue != null && addValue.isJsonPrimitive()
+            && addValue.getAsJsonPrimitive().isBoolean() && addValue.getAsBoolean();
+        if (!"minecraft:set_count".equals(string(function, "function"))
+            || function.entrySet().stream().anyMatch(field ->
+                !Set.of("function", "count", "add", "conditions").contains(field.getKey()))
+            || hasEntries(function, "conditions")
+            || addValue != null && (!addValue.isJsonPrimitive()
+                || !addValue.getAsJsonPrimitive().isBoolean() || additiveCount)
+            || !hasPositiveIntegerCountRange(function.get("count"))) {
+            return Set.of();
+        }
+        String itemName = string(entry, "name");
+        ResourceLocation item = itemName == null ? null : ResourceLocation.tryParse(itemName);
+        return item == null ? Set.of() : Set.of(item.toString());
+    }
+
+    private static boolean hasPositiveIntegerCountRange(JsonElement count) {
+        if (count == null) {
+            return false;
+        }
+        if (count.isJsonPrimitive() && count.getAsJsonPrimitive().isNumber()) {
+            OptionalDouble value = exactNumber(count, Double.NaN);
+            return value.isPresent() && isPositiveInteger(value.getAsDouble());
+        }
+        if (!count.isJsonObject()) {
+            return false;
+        }
+        JsonObject provider = count.getAsJsonObject();
+        String type = string(provider, "type");
+        if ("minecraft:constant".equals(type)
+            && provider.entrySet().stream().allMatch(field -> Set.of("type", "value").contains(field.getKey()))) {
+            OptionalDouble value = exactNumber(provider.get("value"), Double.NaN);
+            return value.isPresent() && isPositiveInteger(value.getAsDouble());
+        }
+        if (type != null && !"minecraft:uniform".equals(type)
+            || provider.entrySet().stream().anyMatch(field ->
+                !Set.of("type", "min", "max").contains(field.getKey()))
+            || !provider.has("min") || !provider.has("max")) {
+            return false;
+        }
+        OptionalDouble minimum = exactNumber(provider.get("min"), Double.NaN);
+        OptionalDouble maximum = exactNumber(provider.get("max"), Double.NaN);
+        return minimum.isPresent() && maximum.isPresent()
+            && isPositiveInteger(minimum.getAsDouble())
+            && isPositiveInteger(maximum.getAsDouble())
+            && minimum.getAsDouble() <= maximum.getAsDouble();
+    }
+
+    private static boolean isPositiveInteger(double value) {
+        return Double.isFinite(value) && value > 0.0D && value == Math.rint(value);
+    }
+
+    private static OutputPossibilityStatus outputPossibility(Double expectedUnitsPerAttempt,
+        boolean explicitlyProven) {
+        return explicitlyProven || expectedUnitsPerAttempt != null
+            && Double.isFinite(expectedUnitsPerAttempt) && expectedUnitsPerAttempt > 0.0D
+                ? OutputPossibilityStatus.PROVEN_POSSIBLE
+                : OutputPossibilityStatus.UNKNOWN_CANDIDATE;
+    }
+
+    private static String outputPossibilityReason(OutputPossibilityStatus status,
+        Double expectedUnitsPerAttempt) {
+        if (status == OutputPossibilityStatus.UNKNOWN_CANDIDATE) {
+            return "item is an indexed candidate, but supported loot evaluation does not establish that it can occur";
+        }
+        return expectedUnitsPerAttempt == null
+            ? "supported minecraft:set_count semantics and a strictly positive resolved count range establish "
+                + "possible positive output; expected quantity remains unresolved"
+            : "supported loot evaluation establishes positive expected output for this exact item";
+    }
+
+    private static Boolean ordinaryPlayerBreakRequiresCorrectTool(String tableId) {
+        ResourceLocation tableLocation = ResourceLocation.tryParse(tableId);
+        if (tableLocation == null) {
+            return null;
+        }
+        List<Boolean> requirements = new ArrayList<>();
+        for (var block : BuiltInRegistries.BLOCK) {
+            if (block.getLootTable().location().equals(tableLocation)) {
+                requirements.add(block.defaultBlockState().requiresCorrectToolForDrops());
+            }
+        }
+        return uniqueCorrectToolRequirement(requirements);
+    }
+
+    static Boolean uniqueCorrectToolRequirement(Collection<Boolean> requirements) {
+        Boolean resolved = null;
+        boolean found = false;
+        if (requirements == null || requirements.isEmpty()) {
+            return null;
+        }
+        for (Boolean requirement : requirements) {
+            if (requirement == null || found && !resolved.equals(requirement)) {
+                return null;
+            }
+            resolved = requirement;
+            found = true;
+        }
+        return found ? resolved : null;
     }
 
     private static Set<String> ordinaryPlayerBreakOutputs(String tableId, JsonObject root) {
@@ -416,7 +633,7 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
             return Set.of();
         }
 
-        JsonArray pools = root.getAsJsonArray("pools");
+        JsonArray pools = jsonArray(root, "pools");
         if (pools == null || pools.size() != 1 || !pools.get(0).isJsonObject()) {
             return Set.of();
         }
@@ -429,7 +646,7 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         }
         OptionalDouble rolls = exactNumber(pool.get("rolls"), 1.0D);
         OptionalDouble bonusRolls = exactNumber(pool.get("bonus_rolls"), 0.0D);
-        JsonArray entries = pool.getAsJsonArray("entries");
+        JsonArray entries = jsonArray(pool, "entries");
         if (rolls.isEmpty() || rolls.getAsDouble() != 1.0D
             || bonusRolls.isEmpty() || bonusRolls.getAsDouble() != 0.0D
             || entries == null || entries.size() != 1 || !entries.get(0).isJsonObject()) {
@@ -437,12 +654,11 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         }
 
         JsonObject entry = entries.get(0).getAsJsonObject();
-        ResourceLocation output = ResourceLocation.tryParse(string(entry, "name"));
+        ResourceLocation output = ordinaryBlockItemOutput(entry);
         String blockItemId = BuiltInRegistries.ITEM.getKey(block.asItem()).toString();
         OptionalDouble weight = exactNumber(entry.get("weight"), 1.0D);
         OptionalDouble quality = exactNumber(entry.get("quality"), 0.0D);
-        if (!"minecraft:item".equals(string(entry, "type"))
-            || output == null || !output.toString().equals(blockItemId)
+        if (output == null || !output.toString().equals(blockItemId)
             || weight.isEmpty() || weight.getAsDouble() != 1.0D
             || quality.isEmpty() || quality.getAsDouble() != 0.0D
             || !hasNoEntries(entry, "conditions") || !hasNoEntries(entry, "functions")
@@ -452,6 +668,14 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
             return Set.of();
         }
         return Set.of(blockItemId);
+    }
+
+    static ResourceLocation ordinaryBlockItemOutput(JsonObject entry) {
+        if (!"minecraft:item".equals(string(entry, "type"))) {
+            return null;
+        }
+        String outputName = string(entry, "name");
+        return outputName == null ? null : ResourceLocation.tryParse(outputName);
     }
 
     private static boolean onlyOrdinaryBlockBreakConditions(JsonObject pool) {
@@ -483,7 +707,7 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         if (hasEntries(root, "functions") || root.has("neoforge:conditions")) {
             return Optional.empty();
         }
-        JsonArray pools = root.getAsJsonArray("pools");
+        JsonArray pools = jsonArray(root, "pools");
         if (pools == null || pools.isEmpty()) {
             return Optional.empty();
         }
@@ -507,7 +731,7 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 || bonusRolls.isEmpty() || bonusRolls.getAsDouble() != 0.0D) {
                 return Optional.empty();
             }
-            JsonArray entries = pool.getAsJsonArray("entries");
+            JsonArray entries = jsonArray(pool, "entries");
             if (entries == null || entries.isEmpty()) {
                 return Optional.empty();
             }
@@ -529,7 +753,8 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
                 }
                 OptionalDouble weight = exactNumber(entry.get("weight"), 1.0D);
                 OptionalDouble quality = exactNumber(entry.get("quality"), 0.0D);
-                ResourceLocation item = ResourceLocation.tryParse(string(entry, "name"));
+                String itemName = string(entry, "name");
+                ResourceLocation item = itemName == null ? null : ResourceLocation.tryParse(itemName);
                 if (weight.isEmpty() || weight.getAsDouble() <= 0.0D
                     || quality.isEmpty() || quality.getAsDouble() != 0.0D || item == null) {
                     return Optional.empty();
@@ -568,12 +793,16 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
     }
 
     private static void collectPossibleItemOutputs(JsonElement element, Set<String> result) {
+        if (element == null) {
+            return;
+        }
         if (element.isJsonArray()) {
             element.getAsJsonArray().forEach(child -> collectPossibleItemOutputs(child, result));
         } else if (element.isJsonObject()) {
             JsonObject object = element.getAsJsonObject();
             if ("minecraft:item".equals(string(object, "type"))) {
-                ResourceLocation item = ResourceLocation.tryParse(string(object, "name"));
+                String itemName = string(object, "name");
+                ResourceLocation item = itemName == null ? null : ResourceLocation.tryParse(itemName);
                 if (item != null) {
                     result.add(item.toString());
                 }
@@ -583,8 +812,13 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
     }
 
     private static boolean hasEntries(JsonObject object, String name) {
-        JsonArray values = object.getAsJsonArray(name);
-        return values != null && !values.isEmpty();
+        JsonElement value = object.get(name);
+        return value != null && (!value.isJsonArray() || !value.getAsJsonArray().isEmpty());
+    }
+
+    private static JsonArray jsonArray(JsonObject object, String name) {
+        JsonElement value = object.get(name);
+        return value != null && value.isJsonArray() ? value.getAsJsonArray() : null;
     }
 
     private static String string(JsonObject object, String name) {
@@ -610,26 +844,51 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         return OptionalDouble.empty();
     }
 
+    private static Set<String> positiveExpectedItems(Map<String, Double> expectedUnitsByItem) {
+        return expectedUnitsByItem.entrySet().stream()
+            .filter(entry -> entry.getValue() != null && Double.isFinite(entry.getValue())
+                && entry.getValue() > 0.0D)
+            .map(Map.Entry::getKey)
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
     public record ParsedTable(String tableId, String sourceType, Map<String, Double> expectedUnitsByItem,
         Set<String> unknownItems, Map<String, LootEvidence> evidenceByItem,
-        Set<String> ordinaryPlayerBreakOutputs) {
+        Set<String> ordinaryPlayerBreakOutputs, Boolean ordinaryPlayerBreakRequiresCorrectTool,
+        Set<String> provenPossibleItems) {
         public ParsedTable(String tableId, Map<String, Double> expectedUnitsByItem) {
             this(tableId, LootTableAcquisitionAnalyzer.sourceType(ResourceLocation.parse(tableId)),
-                expectedUnitsByItem, Set.of(), Map.of(), Set.of());
+                expectedUnitsByItem, Set.of(), Map.of(), Set.of(), null, positiveExpectedItems(expectedUnitsByItem));
         }
 
         public ParsedTable(String tableId, String sourceType, Map<String, Double> expectedUnitsByItem) {
-            this(tableId, sourceType, expectedUnitsByItem, Set.of(), Map.of(), Set.of());
+            this(tableId, sourceType, expectedUnitsByItem, Set.of(), Map.of(), Set.of(), null,
+                positiveExpectedItems(expectedUnitsByItem));
+        }
+
+        public ParsedTable(String tableId, String sourceType, Map<String, Double> expectedUnitsByItem,
+            Set<String> unknownItems, Map<String, LootEvidence> evidenceByItem,
+            Set<String> ordinaryPlayerBreakOutputs, Boolean ordinaryPlayerBreakRequiresCorrectTool) {
+            this(tableId, sourceType, expectedUnitsByItem, unknownItems, evidenceByItem,
+                ordinaryPlayerBreakOutputs, ordinaryPlayerBreakRequiresCorrectTool,
+                positiveExpectedItems(expectedUnitsByItem));
         }
 
         public ParsedTable(String tableId, String sourceType, Map<String, Double> expectedUnitsByItem,
             Set<String> unknownItems) {
-            this(tableId, sourceType, expectedUnitsByItem, unknownItems, Map.of(), Set.of());
+            this(tableId, sourceType, expectedUnitsByItem, unknownItems, Map.of(), Set.of(), null);
         }
 
         public ParsedTable(String tableId, String sourceType, Map<String, Double> expectedUnitsByItem,
             Set<String> unknownItems, Map<String, LootEvidence> evidenceByItem) {
-            this(tableId, sourceType, expectedUnitsByItem, unknownItems, evidenceByItem, Set.of());
+            this(tableId, sourceType, expectedUnitsByItem, unknownItems, evidenceByItem, Set.of(), null);
+        }
+
+        public ParsedTable(String tableId, String sourceType, Map<String, Double> expectedUnitsByItem,
+            Set<String> unknownItems, Map<String, LootEvidence> evidenceByItem,
+            Set<String> ordinaryPlayerBreakOutputs) {
+            this(tableId, sourceType, expectedUnitsByItem, unknownItems, evidenceByItem,
+                ordinaryPlayerBreakOutputs, null);
         }
 
         public ParsedTable {
@@ -637,6 +896,7 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
             unknownItems = Set.copyOf(unknownItems);
             evidenceByItem = Map.copyOf(evidenceByItem);
             ordinaryPlayerBreakOutputs = Set.copyOf(ordinaryPlayerBreakOutputs);
+            provenPossibleItems = Set.copyOf(provenPossibleItems);
             if (sourceType == null || sourceType.isBlank()) {
                 throw new IllegalArgumentException("loot source type is required");
             }
@@ -645,18 +905,25 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
             }
             Set<String> allOutputs = new java.util.HashSet<>(expectedUnitsByItem.keySet());
             allOutputs.addAll(unknownItems);
-            if (!allOutputs.containsAll(ordinaryPlayerBreakOutputs)) {
-                throw new IllegalArgumentException("ordinary block-break evidence must refer to a parsed output");
+            if (!allOutputs.containsAll(ordinaryPlayerBreakOutputs)
+                || !allOutputs.containsAll(provenPossibleItems)) {
+                throw new IllegalArgumentException("loot evidence must refer to a parsed item output");
             }
         }
 
         private ParsedTable withSourceType(String type) {
             return new ParsedTable(tableId, type, expectedUnitsByItem, unknownItems, evidenceByItem,
-                ordinaryPlayerBreakOutputs);
+                ordinaryPlayerBreakOutputs, ordinaryPlayerBreakRequiresCorrectTool, provenPossibleItems);
         }
 
-        private ParsedTable withOrdinaryPlayerBreakOutputs(Set<String> outputs) {
-            return new ParsedTable(tableId, sourceType, expectedUnitsByItem, unknownItems, evidenceByItem, outputs);
+        private ParsedTable withOrdinaryPlayerBreakOutputs(Set<String> outputs, Boolean requiresCorrectTool) {
+            return new ParsedTable(tableId, sourceType, expectedUnitsByItem, unknownItems, evidenceByItem, outputs,
+                requiresCorrectTool, provenPossibleItems);
+        }
+
+        private ParsedTable withProvenPossibleItems(Set<String> outputs) {
+            return new ParsedTable(tableId, sourceType, expectedUnitsByItem, unknownItems, evidenceByItem,
+                ordinaryPlayerBreakOutputs, ordinaryPlayerBreakRequiresCorrectTool, outputs);
         }
     }
 
@@ -669,8 +936,18 @@ public final class LootTableAcquisitionAnalyzer implements AcquisitionAnalyzer {
         }
     }
 
+    private enum OutputPossibilityStatus {
+        PROVEN_POSSIBLE,
+        UNKNOWN_CANDIDATE
+    }
+
     private record LootSource(String tableId, String sourceType, Double expectedUnitsPerAttempt,
-        LootEvidence evidence, boolean ordinaryPlayerBreakOutput) {
+        LootEvidence evidence, OutputPossibilityStatus outputPossibility,
+        boolean ordinaryPlayerBreakOutput, Boolean requiresCorrectTool) {
+        private String outputPossibilityReason() {
+            return LootTableAcquisitionAnalyzer.outputPossibilityReason(outputPossibility,
+                expectedUnitsPerAttempt);
+        }
     }
 
     private record ItemLootSource(String itemId, LootSource source) {}

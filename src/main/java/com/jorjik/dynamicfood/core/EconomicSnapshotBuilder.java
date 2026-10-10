@@ -16,10 +16,7 @@ import java.util.function.BiFunction;
 
 public final class EconomicSnapshotBuilder {
     public static final int SCHEMA_VERSION = 5;
-    static final Comparator<AcquisitionPath> PATH_ORDER = Comparator
-        .comparing(AcquisitionPath::itemId)
-        .thenComparing(AcquisitionPath::sourceType)
-        .thenComparing(AcquisitionPath::sourceId);
+    static final Comparator<AcquisitionPath> PATH_ORDER = AcquisitionPathDeduplicator.PATH_ORDER;
 
     private EconomicSnapshotBuilder() {}
 
@@ -61,7 +58,7 @@ public final class EconomicSnapshotBuilder {
                         paths.addAll(analyzer.analyze(resourceId));
                     }
                 }
-                pathsByResource.put(resourceId, paths.stream().sorted(PATH_ORDER).toList());
+                pathsByResource.put(resourceId, AcquisitionPathDeduplicator.deduplicate(paths));
             });
 
         Map<String, List<AcquisitionPath>> resolvedPaths =
@@ -124,6 +121,7 @@ public final class EconomicSnapshotBuilder {
         append(target, path.itemId());
         append(target, path.sourceType());
         append(target, path.sourceId());
+        append(target, path.pathIdentity().canonicalKey());
         append(target, Double.toHexString(path.confidence()));
         append(target, nullable(path.renewability()));
         append(target, nullable(path.risk()));
@@ -156,6 +154,7 @@ public final class EconomicSnapshotBuilder {
             append(target, Integer.toString(input.alternatives().size()));
             input.alternatives().forEach(alternative -> append(target, alternative));
         });
+        append(target, path.evidence().worldgenCausalEvidence().canonicalKey());
         appendCost(target, path.economicCost());
         EconomicCostSchedule schedule = path.economicCostSchedule();
         append(target, schedule == null ? null : schedule.evidence());

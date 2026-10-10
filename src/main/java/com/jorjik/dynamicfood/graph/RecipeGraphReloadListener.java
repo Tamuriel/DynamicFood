@@ -128,7 +128,7 @@ public final class RecipeGraphReloadListener extends SimplePreparableReloadListe
         }
         List<RecipeNode> immutableNodes = List.copyOf(nodes);
         engine.replaceStaticRecipes(immutableNodes);
-        engine.rebuildLootTableAnalyzer(resourceManager);
+        engine.rebuildLootTableAnalyzer(resourceManager, registries);
         engine.markStaticAcquisitionInputsReady();
         onInputsReloaded.run();
         Set<String> loggedAmbiguities = new HashSet<>();

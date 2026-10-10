@@ -61,7 +61,7 @@ public final class SurvivalAcquirabilityResolver {
                 attributes.put("source_availability_stage", availability.stage());
                 attributes.put("survival_availability", availability.explanation());
                 return path.withEvidence(new AcquisitionEvidence(path.evidence().measurements(),
-                    attributes, path.evidence().inputs()));
+                    attributes, path.evidence().inputs(), path.evidence().worldgenCausalEvidence()));
             }).toList();
             resolved.put(resourceId, classified);
         });

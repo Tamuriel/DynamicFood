@@ -47,10 +47,12 @@ public final class DynamicFoodEngine {
     private volatile AcquisitionAnalyzer recipeGraphAcquisitionAnalyzer;
     private volatile LootTableAcquisitionAnalyzer lootTableAcquisitionAnalyzer;
     private volatile WorldgenAcquisitionAnalyzer worldgenAcquisitionAnalyzer;
+    private volatile StructureContainerAcquisitionAnalyzer structureContainerAcquisitionAnalyzer;
     private volatile Map<String, Set<String>> activeWorldgenDimensionBiomes = Map.of();
     private volatile VillagerTradeAcquisitionAnalyzer villagerTradeAcquisitionAnalyzer =
         VillagerTradeAcquisitionAnalyzer.empty();
     private volatile boolean staticAcquisitionInputsReady;
+    private volatile Runnable providerModelChangeListener = () -> {};
     private final Map<String, EconomicCostResolution> economicResolutionCache = new ConcurrentHashMap<>();
     private final Map<String, List<AcquisitionPath>> acquisitionPathCache = new ConcurrentHashMap<>();
     private volatile List<String> calibrationDiscoveryDiagnostics = List.of("Calibration discovery has not run");
@@ -106,14 +108,23 @@ public final class DynamicFoodEngine {
 
     public void registerProvider(MechanicProvider provider) {
         providerContributionRegistry.register(provider);
+        invalidateAcquisitionDerivedState();
+        providerModelChangeListener.run();
     }
 
     public void clearProviders() {
         providerContributionRegistry.clear();
+        invalidateAcquisitionDerivedState();
+        providerModelChangeListener.run();
     }
 
     public EffectiveMechanicModel effectiveMechanicModel() {
         return providerContributionRegistry.resolve();
+    }
+
+    public void setProviderModelChangeListener(Runnable listener) {
+        providerModelChangeListener = java.util.Objects.requireNonNull(listener,
+            "provider model change listener is required");
     }
 
     public RecipeOperation createRecipeOperation(Recipe<?> recipe, String recipeId, String recipeType, String station,
@@ -138,11 +149,7 @@ public final class DynamicFoodEngine {
 
     public void invalidate() {
         cache.clear();
-        economicResolutionCache.clear();
-        acquisitionPathCache.clear();
-        recipeEconomicAnalyzer = null;
-        recipeGraphAcquisitionAnalyzer = null;
-        providerContributionRegistry.clear();
+        invalidateAcquisitionDerivedState();
     }
 
     public synchronized void rebuildCalibration(Collection<ResourceEconomicProfile> profiles,
@@ -210,6 +217,11 @@ public final class DynamicFoodEngine {
             WorldgenAcquisitionAnalyzer worldgenAnalyzer = worldgenAcquisitionAnalyzer;
             if (worldgenAnalyzer != null) {
                 candidates.addAll(worldgenAnalyzer.indexedItemIds());
+            }
+            StructureContainerAcquisitionAnalyzer structureAnalyzer =
+                structureContainerAcquisitionAnalyzer;
+            if (structureAnalyzer != null) {
+                candidates.addAll(structureAnalyzer.indexedItemIds());
             }
             candidates.addAll(villagerTradeAcquisitionAnalyzer.indexedItemIds());
             Map<String, List<AcquisitionPath>> availabilityPaths = resolveSurvivalPaths(candidates);
@@ -418,23 +430,28 @@ public final class DynamicFoodEngine {
     }
 
     private List<AcquisitionPath> buildAcquisitionPaths(String itemId) {
-        AcquisitionAnalyzer analyzer = recipeGraphAcquisitionAnalyzer();
-        ArrayList<AcquisitionPath> paths = new ArrayList<>(analyzer.analyze(itemId));
-        LootTableAcquisitionAnalyzer lootAnalyzer = lootTableAcquisitionAnalyzer;
-        if (lootAnalyzer != null) {
-            paths.addAll(lootAnalyzer.analyze(itemId));
+        EffectiveMechanicModel model = effectiveMechanicModel();
+        ArrayList<AcquisitionPath> paths = new ArrayList<>();
+        List<AcquisitionAnalyzer> analyzers = new ArrayList<>();
+        analyzers.add(recipeGraphAcquisitionAnalyzer());
+        if (lootTableAcquisitionAnalyzer != null) {
+            analyzers.add(lootTableAcquisitionAnalyzer);
         }
-        WorldgenAcquisitionAnalyzer worldgenAnalyzer = worldgenAcquisitionAnalyzer;
-        if (worldgenAnalyzer != null) {
-            paths.addAll(worldgenAnalyzer.analyze(itemId));
+        if (worldgenAcquisitionAnalyzer != null) {
+            analyzers.add(worldgenAcquisitionAnalyzer);
         }
-        paths.addAll(villagerTradeAcquisitionAnalyzer.analyze(itemId));
-        for (AcquisitionAnalyzer additional : acquisitionAnalyzers) {
-            if (additional.supports(itemId)) {
-                paths.addAll(additional.analyze(itemId));
+        if (structureContainerAcquisitionAnalyzer != null) {
+            analyzers.add(structureContainerAcquisitionAnalyzer);
+        }
+        analyzers.add(villagerTradeAcquisitionAnalyzer);
+        analyzers.addAll(acquisitionAnalyzers);
+        for (AcquisitionAnalyzer baseAnalyzer : analyzers) {
+            AcquisitionAnalyzer analyzer = withEffectiveMechanicModel(baseAnalyzer, model);
+            if (analyzer.supports(itemId)) {
+                paths.addAll(analyzer.analyze(itemId));
             }
         }
-        return paths.stream().sorted(java.util.Comparator.comparing(AcquisitionPath::sourceId)).toList();
+        return AcquisitionPathDeduplicator.deduplicate(paths);
     }
 
     private synchronized AcquisitionAnalyzer recipeGraphAcquisitionAnalyzer() {
@@ -470,9 +487,13 @@ public final class DynamicFoodEngine {
         if (worldgenAcquisitionAnalyzer != null) {
             analyzers.add(worldgenAcquisitionAnalyzer);
         }
+        if (structureContainerAcquisitionAnalyzer != null) {
+            analyzers.add(structureContainerAcquisitionAnalyzer);
+        }
         analyzers.add(villagerTradeAcquisitionAnalyzer);
         analyzers.addAll(acquisitionAnalyzers);
-        return List.copyOf(analyzers);
+        EffectiveMechanicModel model = effectiveMechanicModel();
+        return analyzers.stream().map(analyzer -> withEffectiveMechanicModel(analyzer, model)).toList();
     }
 
     public void markStaticAcquisitionInputsReady() {
@@ -544,18 +565,44 @@ public final class DynamicFoodEngine {
         acquisitionPathCache.clear();
     }
 
-    public synchronized void rebuildLootTableAnalyzer(net.minecraft.server.packs.resources.ResourceManager resources) {
+    private void invalidateAcquisitionDerivedState() {
+        economicResolutionCache.clear();
+        acquisitionPathCache.clear();
+        recipeEconomicAnalyzer = null;
+        recipeGraphAcquisitionAnalyzer = null;
+    }
+
+    private static AcquisitionAnalyzer withEffectiveMechanicModel(AcquisitionAnalyzer analyzer,
+        EffectiveMechanicModel model) {
+        return model.hasContributions()
+            ? new EffectiveMechanicAcquisitionAnalyzer(analyzer, model) : analyzer;
+    }
+
+    public synchronized void rebuildLootTableAnalyzer(
+        net.minecraft.server.packs.resources.ResourceManager resources,
+        net.minecraft.core.HolderLookup.Provider registries) {
+        if (resources == null || registries == null) {
+            throw new IllegalArgumentException("resource and registry lookups are required");
+        }
         lootTableAcquisitionAnalyzer = LootTableAcquisitionAnalyzer.fromResourceManager(resources,
             com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsReference(),
             com.jorjik.dynamicfood.config.DynamicFoodConfig.lootAttemptsCap());
         worldgenAcquisitionAnalyzer = WorldgenAcquisitionAnalyzer.fromResourceManager(resources,
             lootTableAcquisitionAnalyzer);
+        structureContainerAcquisitionAnalyzer =
+            StructureContainerAcquisitionAnalyzer.fromResourceManager(resources, registries,
+                lootTableAcquisitionAnalyzer);
         if (!activeWorldgenDimensionBiomes.isEmpty()) {
             worldgenAcquisitionAnalyzer =
                 worldgenAcquisitionAnalyzer.withActiveDimensionBiomes(activeWorldgenDimensionBiomes);
         }
         economicResolutionCache.clear();
         acquisitionPathCache.clear();
+    }
+
+    public StructureContainerAcquisitionAnalyzer.Summary structureContainerAnalysisSummary() {
+        StructureContainerAcquisitionAnalyzer analyzer = structureContainerAcquisitionAnalyzer;
+        return analyzer == null ? null : analyzer.summary();
     }
 
     public synchronized void rebuildLootTableAnalyzer(LootTableAcquisitionAnalyzer analyzer,

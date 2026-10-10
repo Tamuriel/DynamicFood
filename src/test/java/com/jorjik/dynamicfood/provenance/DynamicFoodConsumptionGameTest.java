@@ -780,9 +780,11 @@ public final class DynamicFoodConsumptionGameTest {
                 && path.evidence().measurement("expected_units_per_attempt") != null
                 && !path.evidence().measurement("expected_units_per_attempt").isKnown()
                 && path.evidence().attributes().get("canonical_quantity_source")
-                    .equals("unknown: no indexed block-loot extraction output")
+                    .equals("expected_units_per_attempt")
                 && path.evidence().attributes().get("canonical_quantity_unit")
-                    .equals("item per defined extraction operation (unresolved)")
+                    .equals("item per block-break loot invocation")
+                && path.evidence().measurement("expected_units_per_attempt").unknownReason()
+                    .contains("unsupported or conditional loot semantics")
                 && path.evidence().attributes().get("block_loot_table")
                     .equals("minecraft:blocks/coal_ore")
                 && "UNKNOWN".equals(path.evidence().attributes()

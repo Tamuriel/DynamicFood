@@ -6,6 +6,10 @@ import java.util.List;
 public interface MechanicProvider {
     String providerId();
 
+    default String providerVersion() {
+        return getClass().getName();
+    }
+
     default Collection<ProviderContribution> contributions() {
         return List.of();
     }

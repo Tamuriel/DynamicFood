@@ -25,7 +25,8 @@ public final class EconomicSnapshotDiagnosticReport {
 
     private EconomicSnapshotDiagnosticReport() {}
 
-    public static JsonObject create(PublishedEconomicGeneration generation) {
+    public static JsonObject create(PublishedEconomicGeneration generation,
+        StructureContainerAcquisitionAnalyzer.Summary structureSummary) {
         if (generation == null) {
             throw new IllegalArgumentException("published economic generation is required");
         }
@@ -88,8 +89,43 @@ public final class EconomicSnapshotDiagnosticReport {
         report.add("summary", counts.toJson());
         report.add("resources", resources);
         report.add("perAnalyzer", analyzersJson(byAnalyzer));
+        if (structureSummary != null) {
+            report.add("structureAnalysis", structureAnalysisJson(structureSummary));
+        }
         report.add("policyAudit", policyAudit(observations, snapshot, costWeights));
         return report;
+    }
+
+    private static JsonObject structureAnalysisJson(StructureContainerAcquisitionAnalyzer.Summary summary) {
+        JsonObject result = new JsonObject();
+        result.addProperty("structureSets", summary.structureSets());
+        result.addProperty("structures", summary.structures());
+        result.addProperty("jigsawStructures", summary.jigsawStructures());
+        result.addProperty("templatePools", summary.templatePools());
+        result.addProperty("templateResources", summary.templateResources());
+        result.addProperty("referencedTemplates", summary.referencedTemplates());
+        result.addProperty("loadedTemplates", summary.loadedTemplates());
+        result.addProperty("templateBlockEntries", summary.templateBlockEntries());
+        result.addProperty("blockEntityTags", summary.blockEntityTags());
+        result.addProperty("lootTableTags", summary.lootTableTags());
+        result.addProperty("invalidContainerReferences", summary.invalidContainerReferences());
+        result.addProperty("containerPlacements", summary.containerPlacements());
+        result.addProperty("staticContainerInventories", summary.staticContainerInventories());
+        result.addProperty("containersWithLootTables", summary.containersWithLootTables());
+        result.addProperty("lootTableIds", summary.lootTableIds());
+        result.addProperty("candidateRoutes", summary.candidateRoutes());
+        result.addProperty("candidatePaths", summary.candidatePaths());
+        result.addProperty("completeCandidates", summary.completeCandidates());
+        result.addProperty("partialCandidates", summary.partialCandidates());
+        result.addProperty("unresolvedReferences", summary.unresolvedReferences());
+        result.addProperty("cycleReferences", summary.cycleReferences());
+        result.addProperty("aliasEntries", summary.aliasEntries());
+        result.addProperty("unsupportedPoolElements", summary.unsupportedPoolElements());
+        result.addProperty("unresolvedBiomeTags", summary.unresolvedBiomeTags());
+        JsonArray unsupportedTypes = new JsonArray();
+        summary.unsupportedStructureTypes().forEach(unsupportedTypes::add);
+        result.add("unsupportedStructureTypes", unsupportedTypes);
+        return result;
     }
 
     private static PathObservation inspectPath(EconomicSnapshot.ResourceResult resource, AcquisitionPath path,
@@ -560,7 +596,58 @@ public final class EconomicSnapshotDiagnosticReport {
             measurements.add(name, measurementJson(name, measurement)));
         evidence.add("measurements", measurements);
         evidence.add("attributes", stringMap(path.evidence().attributes()));
+        WorldgenCausalEvidence causalEvidence = path.evidence().worldgenCausalEvidence();
+        if (path.sourceType().equals("worldgen_structure_container")) {
+            JsonObject summary = new JsonObject();
+            summary.addProperty("nodeCount", causalEvidence.nodes().size());
+            summary.addProperty("relationshipCount", causalEvidence.relationships().size());
+            summary.add("nodeTypes", enumCounts(causalEvidence.nodes().stream()
+                .map(node -> node.ref().type().name()).toList()));
+            summary.add("relationshipTypes", enumCounts(causalEvidence.relationships().stream()
+                .map(relationship -> relationship.type().name()).toList()));
+            evidence.add("worldgenCausalEvidenceSummary", summary);
+        } else {
+            evidence.add("worldgenCausalEvidence", worldgenCausalEvidenceJson(causalEvidence));
+        }
         return evidence;
+    }
+
+    private static JsonObject enumCounts(List<String> values) {
+        JsonObject result = new JsonObject();
+        Map<String, Long> counts = values.stream().collect(java.util.stream.Collectors.groupingBy(
+            value -> value, TreeMap::new, java.util.stream.Collectors.counting()));
+        counts.forEach(result::addProperty);
+        return result;
+    }
+
+    private static JsonObject worldgenCausalEvidenceJson(WorldgenCausalEvidence causalEvidence) {
+        JsonObject result = new JsonObject();
+        JsonArray nodes = new JsonArray();
+        causalEvidence.nodes().forEach(node -> {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("type", node.ref().type().name());
+            entry.addProperty("id", node.ref().identifier());
+            entry.addProperty("sourceResource", node.sourceResource());
+            entry.addProperty("rawEvidence", node.rawEvidence());
+            nodes.add(entry);
+        });
+        JsonArray relationships = new JsonArray();
+        causalEvidence.relationships().forEach(relationship -> {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("fromType", relationship.from().type().name());
+            entry.addProperty("fromId", relationship.from().identifier());
+            entry.addProperty("type", relationship.type().name());
+            entry.addProperty("toType", relationship.to().type().name());
+            entry.addProperty("toId", relationship.to().identifier());
+            entry.addProperty("branchKind", relationship.branchKind().name());
+            entry.addProperty("branchEvidence", relationship.branchEvidence());
+            entry.addProperty("sourceResource", relationship.sourceResource());
+            entry.addProperty("unresolvedReason", relationship.unresolvedReason());
+            relationships.add(entry);
+        });
+        result.add("nodes", nodes);
+        result.add("relationships", relationships);
+        return result;
     }
 
     private static JsonObject measurementJson(String name, AcquisitionMeasurement measurement) {
@@ -694,7 +781,7 @@ public final class EconomicSnapshotDiagnosticReport {
         return switch (sourceType) {
             case "recipe" -> "recipe";
             case "crop" -> "crop";
-            case "worldgen_feature", "worldgen" -> "worldgen";
+            case "worldgen_feature", "worldgen", "worldgen_structure_container" -> "worldgen";
             case "villager_trade" -> "trade";
             case "mob_drop", "fishing", "block_loot", "loot_table" -> "loot";
             default -> "other";

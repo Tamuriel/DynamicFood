@@ -12,6 +12,7 @@ import com.jorjik.dynamicfood.graph.RecipeGraph;
 import com.jorjik.dynamicfood.graph.RecipeNode;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class AcquisitionAnalyzersTest {
@@ -100,9 +101,11 @@ class AcquisitionAnalyzersTest {
                     ]}
                     """)),
             Map.entry("testmod:worldgen/configured_feature/ore_config.json", json("""
-                    {"feature":"minecraft:ore","config":{"size":8,"states":[
-                      {"state":{"Name":"minecraft:coal_ore"}},
-                      {"state":{"Name":"minecraft:deepslate_coal_ore"}}
+                    {"type":"minecraft:ore","config":{"size":8,"targets":[
+                      {"target":{"predicate_type":"minecraft:tag_match","tag":"minecraft:stone_ore_replaceables"},
+                       "state":{"Name":"minecraft:coal_ore"}},
+                      {"target":{"predicate_type":"minecraft:tag_match","tag":"minecraft:deepslate_ore_replaceables"},
+                       "state":{"Name":"minecraft:deepslate_coal_ore"}}
                     ]}}
                     """)),
             Map.entry("testmod:worldgen/placed_feature/trees.json", json("""
@@ -124,16 +127,36 @@ class AcquisitionAnalyzersTest {
                     {"feature":"minecraft:decorated","config":{"feature":"testmod:tree_trunk"}}
                     """)),
             Map.entry("testmod:worldgen/configured_feature/tree_nested.json", json("""
-                    {"feature":"minecraft:tree","config":{"trunk_provider":{
-                      "type":"minecraft:simple_state_provider",
-                      "state":{"Name":"minecraft:oak_log"}
-                    }}}
+                    {"type":"minecraft:tree","config":{
+                      "trunk_provider":{"type":"minecraft:simple_state_provider",
+                        "state":{"Name":"minecraft:oak_log"}},
+                      "foliage_provider":{"type":"minecraft:simple_state_provider",
+                        "state":{"Name":"minecraft:oak_leaves"}},
+                      "dirt_provider":{"type":"minecraft:simple_state_provider",
+                        "state":{"Name":"minecraft:dirt"}},
+                      "trunk_placer":{"type":"minecraft:straight_trunk_placer",
+                        "base_height":4,"height_rand_a":2,"height_rand_b":0},
+                      "foliage_placer":{"type":"minecraft:blob_foliage_placer",
+                        "radius":2,"offset":0,"height":3},
+                      "minimum_size":{"type":"minecraft:two_layers_feature_size",
+                        "limit":1,"lower_size":0,"upper_size":1}
+                    }}
                     """)),
             Map.entry("testmod:worldgen/configured_feature/tree_trunk.json", json("""
-                    {"feature":"minecraft:tree","config":{"trunk_provider":{
-                      "type":"minecraft:simple_state_provider",
-                      "state":{"Name":"minecraft:birch_log"}
-                    }}}
+                    {"type":"minecraft:tree","config":{
+                      "trunk_provider":{"type":"minecraft:simple_state_provider",
+                        "state":{"Name":"minecraft:birch_log"}},
+                      "foliage_provider":{"type":"minecraft:simple_state_provider",
+                        "state":{"Name":"minecraft:birch_leaves"}},
+                      "dirt_provider":{"type":"minecraft:simple_state_provider",
+                        "state":{"Name":"minecraft:dirt"}},
+                      "trunk_placer":{"type":"minecraft:straight_trunk_placer",
+                        "base_height":4,"height_rand_a":2,"height_rand_b":0},
+                      "foliage_placer":{"type":"minecraft:blob_foliage_placer",
+                        "radius":2,"offset":0,"height":3},
+                      "minimum_size":{"type":"minecraft:two_layers_feature_size",
+                        "limit":1,"lower_size":0,"upper_size":1}
+                    }}
                     """)),
             Map.entry("testmod:worldgen/placed_feature/unreferenced.json", json("""
                     {"feature":"testmod:orphan_config","placement":[]}
@@ -153,8 +176,11 @@ class AcquisitionAnalyzersTest {
         assertTrue(discovered.containsKey("minecraft:deepslate_coal_ore"));
         assertTrue(discovered.containsKey("minecraft:oak_log"),
             "nested random-selector configured features must expose their generated block states");
+        assertTrue(discovered.containsKey("minecraft:oak_leaves"),
+            "native tree foliage providers must remain distinct generated block outputs");
         assertTrue(discovered.containsKey("minecraft:birch_log"),
             "decorated configured-feature references must be followed to generated block states");
+        assertTrue(discovered.containsKey("minecraft:birch_leaves"));
         assertTrue(!discovered.containsKey("minecraft:diamond_ore"),
             "configured features not referenced by an enabled biome must not be asserted as obtainable");
         assertTrue(discovered.get("minecraft:coal_ore").size() == 1);
@@ -167,10 +193,344 @@ class AcquisitionAnalyzersTest {
             .get("configured:testmod:ore_config:configured_cluster_size").value());
         assertEquals("testmod:forest", source.attributes().get("biome_restriction"));
         assertEquals("testmod:my_dimension", source.attributes().get("dimension"));
+        assertTrue(source.causalEvidence().nodes().stream().anyMatch(node ->
+            node.ref().identifier().contains("#ore_target:")));
+        assertTrue(source.causalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.MAY_GENERATE_BLOCK
+                && relationship.branchEvidence().contains("predicate_type")));
         var treeSource = discovered.get("minecraft:oak_log").getFirst();
         assertTrue(treeSource.attributes().get("nested_placed_features").contains("testmod:tree_checked"));
         assertTrue(treeSource.attributes().get("configured_features").contains("testmod:tree_nested"));
+        assertTrue(treeSource.causalEvidence().nodes().stream().anyMatch(node ->
+            node.ref().type() == WorldgenCausalEvidence.NodeType.FEATURE_STEP));
+        assertTrue(treeSource.causalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.ALTERNATIVE_BRANCH
+                && relationship.branchEvidence().contains("chance")));
+        assertTrue(treeSource.causalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.DEFAULT_BRANCH));
+        assertTrue(treeSource.causalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.MAY_GENERATE_BLOCK
+                && relationship.to().identifier().contains("minecraft:oak_log")));
 
+    }
+
+    @Test
+    void worldgenCausalEvidenceRetainsBooleanBranchesWeightedOutputsAndUnsupportedMechanics() {
+        Map<String, JsonObject> resources = Map.ofEntries(
+            Map.entry("test:worldgen/biome/forest.json", json("""
+                {"features":[["test:selector"],["test:unknown_provider"]]}
+                """)),
+            Map.entry("test:worldgen/placed_feature/selector.json", json("""
+                {"feature":"test:boolean_selector","placement":[]}
+                """)),
+            Map.entry("test:worldgen/configured_feature/boolean_selector.json", json("""
+                {"type":"minecraft:random_boolean_selector","config":{
+                  "feature_true":"test:weighted_patch",
+                  "feature_false":"test:unsupported_patch"
+                }}
+                """)),
+            Map.entry("test:worldgen/placed_feature/weighted_patch.json", json("""
+                {"feature":"test:weighted_block","placement":[]}
+                """)),
+            Map.entry("test:worldgen/configured_feature/weighted_block.json", json("""
+                {"type":"minecraft:simple_block","config":{"to_place":{
+                  "type":"minecraft:weighted_state_provider","entries":[
+                    {"data":{"Name":"minecraft:stone"},"weight":3},
+                    {"data":{"Name":"minecraft:andesite"},"weight":1}
+                  ]
+                }}}
+                """)),
+            Map.entry("test:worldgen/placed_feature/unsupported_patch.json", json("""
+                {"feature":"test:unsupported_feature","placement":[]}
+                """)),
+            Map.entry("test:worldgen/configured_feature/unsupported_feature.json", json("""
+                {"type":"test:unsupported_feature","config":{"state":{"Name":"minecraft:granite"}}}
+                """)),
+            Map.entry("test:worldgen/placed_feature/unknown_provider.json", json("""
+                {"feature":"test:provider_feature","placement":[]}
+                """)),
+            Map.entry("test:worldgen/configured_feature/provider_feature.json", json("""
+                {"type":"minecraft:simple_block","config":{"to_place":{
+                  "type":"test:unknown_state_provider","state":{"Name":"minecraft:diorite"}
+                }}}
+                """)));
+
+        Map<String, List<WorldgenAcquisitionAnalyzer.WorldgenBlockSource>> discovered =
+            WorldgenAcquisitionAnalyzer.discoverBlockSources(resources);
+
+        assertTrue(discovered.containsKey("minecraft:stone"));
+        assertTrue(discovered.containsKey("minecraft:andesite"));
+        assertTrue(discovered.containsKey("minecraft:granite"));
+        assertTrue(discovered.containsKey("minecraft:diorite"));
+        var stone = discovered.get("minecraft:stone").getFirst();
+        assertTrue(stone.causalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.CONDITIONAL_BRANCH
+                && relationship.branchEvidence().equals("feature_true")));
+        assertTrue(stone.causalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.MAY_GENERATE_BLOCK
+                && relationship.branchEvidence().contains("weighted_state_provider.weight")));
+        var granite = discovered.get("minecraft:granite").getFirst();
+        assertTrue(granite.causalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.UNRESOLVED
+                && relationship.unresolvedReason().contains("not supported")));
+        assertTrue(!granite.measurements().containsKey("expected_units_per_attempt"),
+            "weighted alternatives and unsupported feature evidence do not invent item yield or probability");
+        assertTrue(discovered.get("minecraft:diorite").getFirst().causalEvidence().relationships().stream()
+            .anyMatch(relationship -> relationship.type() == WorldgenCausalEvidence.RelationshipType.UNRESOLVED
+                && relationship.unresolvedReason().contains("unsupported block-state provider")));
+    }
+
+    @Test
+    void worldgenMechanicalIdentityExcludesDiagnosticTextButRetainsItInCanonicalEvidence() {
+        WorldgenCausalEvidence.NodeRef feature = new WorldgenCausalEvidence.NodeRef(
+            WorldgenCausalEvidence.NodeType.CONFIGURED_FEATURE, "test:unknown");
+        WorldgenCausalEvidence.NodeRef unresolved = new WorldgenCausalEvidence.NodeRef(
+            WorldgenCausalEvidence.NodeType.UNRESOLVED_MECHANIC, "test:unknown#output");
+        WorldgenCausalEvidence first = new WorldgenCausalEvidence.Builder()
+            .addNode(feature.type(), feature.identifier(), "test:feature.json", "{}")
+            .addNode(unresolved.type(), unresolved.identifier(), "test:feature.json", "{}")
+            .addRelationship(feature, WorldgenCausalEvidence.RelationshipType.UNRESOLVED, unresolved,
+                WorldgenCausalEvidence.BranchKind.UNKNOWN, "", "test:feature.json", "unsupported feature type")
+            .build();
+        WorldgenCausalEvidence relabeled = new WorldgenCausalEvidence.Builder()
+            .addNode(feature.type(), feature.identifier(), "test:feature.json", "{}")
+            .addNode(unresolved.type(), unresolved.identifier(), "test:feature.json", "{}")
+            .addRelationship(feature, WorldgenCausalEvidence.RelationshipType.UNRESOLVED, unresolved,
+                WorldgenCausalEvidence.BranchKind.UNKNOWN, "", "test:feature.json", "decoder unavailable")
+            .build();
+
+        assertEquals(first.mechanicalIdentityKey(), relabeled.mechanicalIdentityKey());
+        assertFalse(first.canonicalKey().equals(relabeled.canonicalKey()),
+            "diagnostic reason changes remain visible in snapshot evidence");
+    }
+
+    @Test
+    void worldgenReusedPlacedFeatureKeepsEachBranchWithoutInventingACycle() {
+        Map<String, JsonObject> resources = Map.of(
+            "test:worldgen/biome/forest.json", json("""
+                {"features":[["test:root"]]}
+                """),
+            "test:worldgen/placed_feature/root.json", json("""
+                {"feature":"test:selector","placement":[]}
+                """),
+            "test:worldgen/configured_feature/selector.json", json("""
+                {"type":"minecraft:random_selector","config":{
+                  "default":"test:shared",
+                  "features":[
+                    {"chance":0.25,"feature":"test:shared"},
+                    {"chance":0.5,"feature":"test:shared"}
+                  ]
+                }}
+                """),
+            "test:worldgen/placed_feature/shared.json", json("""
+                {"feature":"test:tree","placement":[]}
+                """),
+            "test:worldgen/configured_feature/tree.json", json("""
+                {"type":"minecraft:tree","config":{"trunk_provider":{
+                  "type":"minecraft:simple_state_provider","state":{"Name":"minecraft:oak_log"}
+                }}}
+                """));
+
+        var source = WorldgenAcquisitionAnalyzer.discoverBlockSources(resources)
+            .get("minecraft:oak_log").getFirst();
+        long branchReferences = source.causalEvidence().relationships().stream()
+            .filter(relationship -> relationship.type() == WorldgenCausalEvidence.RelationshipType.ALTERNATIVE_BRANCH
+                && relationship.to().identifier().equals("test:shared"))
+            .count();
+
+        assertEquals(2L, branchReferences);
+        assertTrue(source.causalEvidence().nodes().stream().noneMatch(node ->
+            node.ref().identifier().contains("#cycle")));
+    }
+
+    @Test
+    void worldgenInlineConfiguredFeatureChainRetainsFlowerRandomPatchAndOutput() {
+        Map<String, JsonObject> resources = Map.of(
+            "test:worldgen/biome/forest.json", json("""
+                {"features":[["test:flower_patch"]]}
+                """),
+            "test:worldgen/placed_feature/flower_patch.json", json("""
+                {"feature":"test:flower","placement":[]}
+                """),
+            "test:worldgen/configured_feature/flower.json", json("""
+                {"type":"minecraft:flower","config":{
+                  "tries":64,"xz_spread":7,"y_spread":3,
+                  "feature":{"type":"minecraft:random_patch","config":{
+                    "tries":64,"xz_spread":7,"y_spread":3,
+                    "feature":{"type":"minecraft:simple_block","config":{"to_place":{
+                      "type":"minecraft:simple_state_provider","state":{"Name":"minecraft:allium"}
+                    }}}
+                  }}
+                }}
+                """));
+
+        var source = WorldgenAcquisitionAnalyzer.discoverBlockSources(resources)
+            .get("minecraft:allium").getFirst();
+
+        assertTrue(source.causalEvidence().nodes().stream().filter(node ->
+            node.ref().type() == WorldgenCausalEvidence.NodeType.CONFIGURED_FEATURE).count() == 3);
+        assertTrue(source.causalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.NESTED_CONFIGURED_FEATURE));
+        assertTrue(source.causalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.MAY_GENERATE_BLOCK
+                && relationship.to().identifier().contains("minecraft:allium")));
+    }
+
+    @Test
+    void worldgenRootSystemRetainsNestedPlacedTreeAndRootProviders() {
+        Map<String, JsonObject> resources = Map.of(
+            "test:worldgen/biome/lush_caves.json", json("""
+                {"features":[["test:rooted_azalea"]]}
+                """),
+            "test:worldgen/placed_feature/rooted_azalea.json", json("""
+                {"feature":"test:root_system","placement":[]}
+                """),
+            "test:worldgen/configured_feature/root_system.json", json("""
+                {"type":"minecraft:root_system","config":{
+                  "feature":{"feature":"test:azalea_tree","placement":[]},
+                  "root_state_provider":{"type":"minecraft:simple_state_provider",
+                    "state":{"Name":"minecraft:rooted_dirt"}},
+                  "hanging_root_state_provider":{"type":"minecraft:simple_state_provider",
+                    "state":{"Name":"minecraft:hanging_roots"}}
+                }}
+                """),
+            "test:worldgen/placed_feature/azalea_tree.json", json("""
+                {"feature":"test:azalea_tree","placement":[]}
+                """),
+            "test:worldgen/configured_feature/azalea_tree.json", json("""
+                {"type":"minecraft:tree","config":{
+                  "dirt_provider":{"type":"minecraft:simple_state_provider",
+                    "state":{"Name":"minecraft:dirt"}},
+                  "trunk_provider":{"type":"minecraft:simple_state_provider",
+                    "state":{"Name":"minecraft:oak_log"}},
+                  "foliage_provider":{"type":"minecraft:weighted_state_provider","entries":[
+                    {"data":{"Name":"minecraft:azalea_leaves"},"weight":3},
+                    {"data":{"Name":"minecraft:flowering_azalea_leaves"},"weight":1}
+                  ]},
+                  "decorators":[{"type":"minecraft:alter_ground",
+                    "provider":{"type":"minecraft:simple_state_provider",
+                      "state":{"Name":"minecraft:podzol"}}}]
+                }}
+                """));
+
+        Map<String, List<WorldgenAcquisitionAnalyzer.WorldgenBlockSource>> sources =
+            WorldgenAcquisitionAnalyzer.discoverBlockSources(resources);
+
+        assertTrue(sources.keySet().containsAll(List.of("minecraft:rooted_dirt", "minecraft:hanging_roots",
+            "minecraft:dirt", "minecraft:oak_log", "minecraft:azalea_leaves",
+            "minecraft:flowering_azalea_leaves", "minecraft:podzol")));
+        var leaves = sources.get("minecraft:azalea_leaves").getFirst().causalEvidence();
+        assertTrue(leaves.relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.NESTED_PLACED_FEATURE));
+        assertTrue(leaves.relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.UNRESOLVED
+                && relationship.unresolvedReason().contains("root-system")));
+        assertTrue(leaves.relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.MAY_GENERATE_BLOCK
+                && relationship.branchKind() == WorldgenCausalEvidence.BranchKind.ALTERNATIVE
+                && relationship.to().identifier().contains("minecraft:azalea_leaves")));
+        var podzol = sources.get("minecraft:podzol").getFirst().causalEvidence();
+        assertTrue(podzol.relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.MAY_GENERATE_BLOCK
+                && relationship.branchKind() == WorldgenCausalEvidence.BranchKind.CONDITIONAL
+                && relationship.branchEvidence().contains("alter_ground")));
+    }
+
+    @Test
+    void worldgenVegetationPatchRetainsConditionalNestedFeatureWithoutResolvingPatchMechanics() {
+        Map<String, JsonObject> resources = Map.of(
+            "test:worldgen/biome/lush_caves.json", json("""
+                {"features":[["test:dripleaf_patch"]]}
+                """),
+            "test:worldgen/placed_feature/dripleaf_patch.json", json("""
+                {"feature":"test:selector","placement":[]}
+                """),
+            "test:worldgen/configured_feature/selector.json", json("""
+                {"type":"minecraft:random_boolean_selector","config":{
+                  "feature_false":{"feature":"test:water_patch","placement":[]},
+                  "feature_true":{"feature":"test:dry_patch","placement":[]}
+                }}
+                """),
+            "test:worldgen/configured_feature/water_patch.json", json("""
+                {"type":"minecraft:waterlogged_vegetation_patch","config":{
+                  "vegetation_chance":0.1,
+                  "ground_state":{"type":"minecraft:simple_state_provider",
+                    "state":{"Name":"minecraft:moss_block"}},
+                  "vegetation_feature":{"feature":"test:dripleaf","placement":[]}
+                }}
+                """),
+            "test:worldgen/configured_feature/dry_patch.json", json("""
+                {"type":"minecraft:vegetation_patch","config":{
+                  "vegetation_chance":0.05,
+                  "ground_state":{"type":"minecraft:simple_state_provider",
+                    "state":{"Name":"minecraft:moss_block"}},
+                  "vegetation_feature":{"feature":"test:dripleaf","placement":[]}
+                }}
+                """),
+            "test:worldgen/placed_feature/dripleaf.json", json("""
+                {"feature":"test:dripleaf_block","placement":[]}
+                """),
+            "test:worldgen/configured_feature/dripleaf_block.json", json("""
+                {"type":"minecraft:simple_block","config":{"to_place":{
+                  "type":"minecraft:weighted_state_provider","entries":[
+                    {"data":{"Name":"minecraft:big_dripleaf"},"weight":1},
+                    {"data":{"Name":"minecraft:small_dripleaf"},"weight":1}
+                  ]
+                }}}
+                """));
+
+        Map<String, List<WorldgenAcquisitionAnalyzer.WorldgenBlockSource>> sources =
+            WorldgenAcquisitionAnalyzer.discoverBlockSources(resources);
+        var dripleaf = sources.get("minecraft:big_dripleaf").getFirst().causalEvidence();
+
+        assertTrue(sources.containsKey("minecraft:small_dripleaf"));
+        assertTrue(sources.containsKey("minecraft:moss_block"));
+        assertTrue(dripleaf.relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.CONDITIONAL_BRANCH
+                && relationship.branchEvidence().contains("vegetation_chance=0.1")));
+        assertTrue(dripleaf.relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.UNRESOLVED
+                && relationship.unresolvedReason().contains("vegetation-patch")));
+        assertTrue(dripleaf.relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.MAY_GENERATE_BLOCK
+                && relationship.branchKind() == WorldgenCausalEvidence.BranchKind.ALTERNATIVE));
+        assertTrue(sources.get("minecraft:moss_block").getFirst().causalEvidence().relationships().stream()
+            .anyMatch(relationship -> relationship.type() == WorldgenCausalEvidence.RelationshipType.UNRESOLVED
+                && relationship.unresolvedReason().contains("vegetation-patch")));
+    }
+
+    @Test
+    void worldgenNativeFlowerForestInlinePlacedFeatureRetainsUnresolvedNoiseProviderOutputs() {
+        Map<String, JsonObject> resources = Map.of(
+            "test:worldgen/biome/forest.json", json("""
+                {"features":[["test:flower_forest"]]}
+                """),
+            "test:worldgen/placed_feature/flower_forest.json", json("""
+                {"feature":"test:flower_flower_forest","placement":[]}
+                """),
+            "test:worldgen/configured_feature/flower_flower_forest.json", json("""
+                {"type":"minecraft:flower","config":{"feature":{
+                  "feature":{"type":"minecraft:simple_block","config":{"to_place":{
+                    "type":"minecraft:noise_provider","states":[
+                      {"Name":"minecraft:dandelion"},
+                      {"Name":"minecraft:allium"}
+                    ]
+                  }}},
+                  "placement":[{"type":"minecraft:block_predicate_filter"}]
+                }}}
+                """));
+
+        Map<String, List<WorldgenAcquisitionAnalyzer.WorldgenBlockSource>> sources =
+            WorldgenAcquisitionAnalyzer.discoverBlockSources(resources);
+        var allium = sources.get("minecraft:allium").getFirst();
+
+        assertTrue(sources.containsKey("minecraft:dandelion"));
+        assertTrue(allium.causalEvidence().nodes().stream().anyMatch(node ->
+            node.ref().type() == WorldgenCausalEvidence.NodeType.PLACED_FEATURE
+                && node.ref().identifier().contains("#config.feature:")));
+        assertTrue(allium.causalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.UNRESOLVED
+                && relationship.unresolvedReason().contains("noise_provider")));
     }
 
     @Test
@@ -245,6 +605,19 @@ class AcquisitionAnalyzersTest {
         assertTrue(coal.costsByHorizon().get(100).factors().get("quantity_cost").isUnknown());
         assertTrue(!coal.economicCost().isKnown());
         assertEquals("UNKNOWN", coal.evidence().attributes().get("source_availability_classification"));
+        assertTrue(stone.evidence().worldgenCausalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.EXTRACTED_BY));
+        assertTrue(stone.evidence().worldgenCausalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.USES_LOOT_TABLE));
+        assertTrue(stone.evidence().worldgenCausalEvidence().relationships().stream().anyMatch(relationship ->
+            relationship.type() == WorldgenCausalEvidence.RelationshipType.YIELDS_ITEM
+                && relationship.to().identifier().equals("minecraft:stone")));
+        assertTrue(stone.evidence().worldgenCausalEvidence().nodes().stream().anyMatch(node ->
+            node.ref().type() == WorldgenCausalEvidence.NodeType.EXTRACTION_OPERATION
+                && node.rawEvidence().contains("requires_correct_tool=UNKNOWN")));
+        assertTrue(stone.evidence().worldgenCausalEvidence().nodes().stream().anyMatch(node ->
+            node.ref().type() == WorldgenCausalEvidence.NodeType.LOOT_TABLE
+                && node.sourceResource().equals("minecraft:loot_table/blocks/stone.json")));
     }
 
     @Test
@@ -344,8 +717,11 @@ class AcquisitionAnalyzersTest {
               "type":"minecraft:simple_state_provider","state":{"Name":"minecraft:birch_log"}
             }}}
             """));
+        var zeroChanceSources = WorldgenAcquisitionAnalyzer.discoverBlockSources(zeroChanceResources);
+        assertTrue(zeroChanceSources.containsKey("minecraft:oak_log"),
+            "the selector's structural branch must remain represented: " + zeroChanceSources.keySet());
         var zeroChanceWorldgen = WorldgenAcquisitionAnalyzer.fromResolvedBlockSources(
-            WorldgenAcquisitionAnalyzer.discoverBlockSources(zeroChanceResources),
+            zeroChanceSources,
             Map.of("minecraft:oak_log", new WorldgenAcquisitionAnalyzer.BlockExtraction(
                 "minecraft:oak_log", "minecraft:blocks/oak_log", false)), lootAnalyzer)
             .withActiveDimensionBiomes(Map.of("minecraft:overworld", java.util.Set.of("testmod:forest")));
@@ -357,6 +733,61 @@ class AcquisitionAnalyzersTest {
             .resolvePathAvailability(Map.of("minecraft:oak_log", List.of(zeroChanceOak)));
         assertEquals("UNKNOWN", zeroChanceClassification.get("minecraft:oak_log").getFirst()
             .evidence().attributes().get("source_availability_classification"));
+    }
+
+    @Test
+    void lootEquipmentAvailabilityUsesOnlyUnambiguousDirectBlockBreakEvidence() {
+        AcquisitionPath noCorrectTool = lootPath("test:blocks/direct", "block_loot",
+            Set.of("test:drop"), Boolean.FALSE);
+        AcquisitionPath correctToolRequired = lootPath("test:blocks/direct", "block_loot",
+            Set.of("test:drop"), Boolean.TRUE);
+        AcquisitionPath missingBlockAssociation = lootPath("test:blocks/direct", "block_loot",
+            Set.of("test:drop"), null);
+        Boolean ambiguousRequirement = LootTableAcquisitionAnalyzer.uniqueCorrectToolRequirement(
+            List.of(false, true));
+        assertEquals(null, ambiguousRequirement);
+        AcquisitionPath ambiguousBlockAssociation = lootPath("test:blocks/direct", "block_loot",
+            Set.of("test:drop"), ambiguousRequirement);
+
+        assertTrue(noCorrectTool.feasibilityFactors().get("equipment_availability").isNotApplicable());
+        assertTrue(correctToolRequired.feasibilityFactors().get("equipment_availability").isUnknown());
+        assertTrue(missingBlockAssociation.feasibilityFactors().get("equipment_availability").isUnknown());
+        assertTrue(ambiguousBlockAssociation.feasibilityFactors().get("equipment_availability").isUnknown());
+
+        Map<String, EconomicFactor> remainingFactors =
+            new java.util.HashMap<>(noCorrectTool.feasibilityFactors());
+        remainingFactors.remove("equipment_availability");
+        Map<String, EconomicFactor> requiredToolRemainingFactors =
+            new java.util.HashMap<>(correctToolRequired.feasibilityFactors());
+        requiredToolRemainingFactors.remove("equipment_availability");
+        assertEquals(requiredToolRemainingFactors, remainingFactors);
+        assertEquals("UNKNOWN",
+            noCorrectTool.evidence().attributes().get("source_availability_classification"));
+        assertEquals(1.0D,
+            noCorrectTool.evidence().measurement("expected_units_per_attempt").value());
+
+        CostVector directDropCost = noCorrectTool.costsByHorizon().get(100);
+        assertTrue(directDropCost.factor(EconomicChannel.QUANTITY).isKnown());
+        assertTrue(directDropCost.factor(EconomicChannel.PROBABILITY_BURDEN).isNotApplicable());
+        assertTrue(directDropCost.factor(EconomicChannel.MATERIAL_CONSUMPTION).isNotApplicable());
+        assertTrue(directDropCost.factor(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN).isNotApplicable());
+        CostVector requiredToolCost = correctToolRequired.costsByHorizon().get(100);
+        assertTrue(requiredToolCost.factor(EconomicChannel.QUANTITY).isKnown());
+        assertTrue(requiredToolCost.factor(EconomicChannel.PROBABILITY_BURDEN).isNotApplicable());
+        assertTrue(requiredToolCost.factor(EconomicChannel.MATERIAL_CONSUMPTION).isNotApplicable());
+        assertTrue(requiredToolCost.factor(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN).isUnknown());
+        assertEquals(noCorrectTool.evidence().measurement("probability"),
+            correctToolRequired.evidence().measurement("probability"));
+
+        for (String unsupportedTable : List.of(
+            "test:blocks/conditional", "test:blocks/alternative", "test:blocks/unsupported")) {
+            AcquisitionPath unsupported = lootPath(unsupportedTable, "block_loot", Set.of(), Boolean.FALSE);
+            assertTrue(unsupported.feasibilityFactors().get("equipment_availability").isUnknown(),
+                unsupportedTable);
+        }
+        AcquisitionPath unrelatedSource = lootPath("test:entities/direct", "mob_drop",
+            Set.of("test:drop"), Boolean.FALSE);
+        assertTrue(unrelatedSource.feasibilityFactors().get("equipment_availability").isUnknown());
     }
 
     @Test
@@ -490,6 +921,220 @@ class AcquisitionAnalyzersTest {
     }
 
     @Test
+    void ordinaryDirectBlockDropWithoutRequiredToolHasCompleteCoreVector() {
+        var table = new LootTableAcquisitionAnalyzer.ParsedTable("test:blocks/direct_drop", "block_loot",
+            Map.of("test:direct_drop", 1.0D), java.util.Set.of(),
+            Map.of("test:direct_drop", new LootTableAcquisitionAnalyzer.LootEvidence(1.0D, 1.0D)),
+            java.util.Set.of("test:direct_drop"), false);
+        AcquisitionPath path = LootTableAcquisitionAnalyzer.fromParsedTables(List.of(table), 1.0D, 100.0D)
+            .analyze("test:direct_drop").getFirst();
+        CostVector vector = path.costsByHorizon().get(100);
+
+        assertTrue(vector.factor(EconomicChannel.QUANTITY).isKnown());
+        assertEquals(1.0D, path.evidence().measurement("expected_units_per_attempt").value());
+        assertTrue(vector.factor(EconomicChannel.PROBABILITY_BURDEN).isNotApplicable());
+        assertTrue(vector.factor(EconomicChannel.MATERIAL_CONSUMPTION).isNotApplicable());
+        assertTrue(vector.factor(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN).isNotApplicable());
+        assertTrue(vector.isCoreComplete());
+    }
+
+    @Test
+    void ordinaryDirectBlockDropWithRequiredToolKeepsEquipmentCostUnknown() {
+        var table = new LootTableAcquisitionAnalyzer.ParsedTable("test:blocks/tool_required", "block_loot",
+            Map.of("test:tool_required", 2.0D), java.util.Set.of(),
+            Map.of("test:tool_required", new LootTableAcquisitionAnalyzer.LootEvidence(1.0D, 2.0D)),
+            java.util.Set.of("test:tool_required"), true);
+        AcquisitionPath path = LootTableAcquisitionAnalyzer.fromParsedTables(List.of(table), 1.0D, 100.0D)
+            .analyze("test:tool_required").getFirst();
+        CostVector vector = path.costsByHorizon().get(100);
+
+        assertTrue(vector.factor(EconomicChannel.QUANTITY).isKnown());
+        assertEquals(2.0D, path.evidence().measurement("expected_units_per_attempt").value());
+        assertTrue(vector.factor(EconomicChannel.MATERIAL_CONSUMPTION).isNotApplicable());
+        assertTrue(vector.factor(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN).isUnknown());
+        assertFalse(vector.isCoreComplete());
+    }
+
+    @Test
+    void ambiguousOrUnavailableBlockToolRequirementRemainsUnknown() {
+        assertEquals(Boolean.FALSE,
+            LootTableAcquisitionAnalyzer.uniqueCorrectToolRequirement(List.of(false, false)));
+        assertEquals(Boolean.TRUE, LootTableAcquisitionAnalyzer.uniqueCorrectToolRequirement(List.of(true)));
+        assertTrue(LootTableAcquisitionAnalyzer.uniqueCorrectToolRequirement(List.of(false, true)) == null);
+        assertTrue(LootTableAcquisitionAnalyzer.uniqueCorrectToolRequirement(
+            java.util.Arrays.asList(null, false)) == null);
+        assertTrue(LootTableAcquisitionAnalyzer.uniqueCorrectToolRequirement(List.of()) == null);
+
+        var table = new LootTableAcquisitionAnalyzer.ParsedTable("test:blocks/unknown_tool", "block_loot",
+            Map.of("test:unknown_tool", 1.0D), java.util.Set.of(),
+            Map.of("test:unknown_tool", new LootTableAcquisitionAnalyzer.LootEvidence(1.0D, 1.0D)),
+            java.util.Set.of("test:unknown_tool"));
+        AcquisitionPath path = LootTableAcquisitionAnalyzer.fromParsedTables(List.of(table), 1.0D, 100.0D)
+            .analyze("test:unknown_tool").getFirst();
+        CostVector vector = path.costsByHorizon().get(100);
+
+        assertTrue(vector.factor(EconomicChannel.MATERIAL_CONSUMPTION).isNotApplicable());
+        assertTrue(vector.factor(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN).isUnknown());
+        assertFalse(vector.isCoreComplete());
+    }
+
+    @Test
+    void conditionalNonDirectLootDoesNotReceiveBlockBreakApplicability() {
+        var parsed = LootTableAcquisitionAnalyzer.parseTable("test:gameplay/conditional_block_drop", json("""
+            {"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"test:conditional_drop",
+              "functions":[{"function":"minecraft:set_count","count":{"min":1,"max":3}}]}]}]}
+            """)).orElseThrow();
+        AcquisitionPath path = LootTableAcquisitionAnalyzer.fromParsedTables(List.of(parsed), 1.0D, 100.0D)
+            .analyze("test:conditional_drop").getFirst();
+        CostVector vector = path.costsByHorizon().get(100);
+
+        assertTrue(parsed.ordinaryPlayerBreakOutputs().isEmpty());
+        assertTrue(vector.factor(EconomicChannel.QUANTITY).isUnknown());
+        assertTrue(vector.factor(EconomicChannel.MATERIAL_CONSUMPTION).isUnknown());
+        assertTrue(vector.factor(EconomicChannel.EQUIPMENT_ECONOMIC_BURDEN).isUnknown());
+        assertTrue(path.feasibilityFactors().get("equipment_availability").isUnknown());
+    }
+
+    @Test
+    void vanillaAlternativesLootPreservesCandidateOutputsWithUnknownYield() {
+        var table = json("""
+            {"type":"minecraft:block","pools":[{"rolls":1,"entries":[
+              {"type":"minecraft:alternatives","children":[
+                {"type":"minecraft:item","name":"minecraft:amethyst_cluster",
+                  "conditions":[{"condition":"minecraft:match_tool"}]},
+                {"type":"minecraft:alternatives","children":[
+                  {"type":"minecraft:item","name":"minecraft:amethyst_shard",
+                    "functions":[{"function":"minecraft:set_count","count":4}]},
+                  {"type":"minecraft:item","name":"minecraft:amethyst_shard",
+                    "functions":[{"function":"minecraft:set_count","count":2}]}
+                ]}
+              ]}
+            ]}],"random_sequence":"minecraft:blocks/amethyst_cluster"}
+            """);
+        JsonObject alternativesEntry = table.getAsJsonArray("pools").get(0).getAsJsonObject()
+            .getAsJsonArray("entries").get(0).getAsJsonObject();
+        assertTrue(LootTableAcquisitionAnalyzer.ordinaryBlockItemOutput(alternativesEntry) == null);
+        assertTrue(LootTableAcquisitionAnalyzer.ordinaryBlockItemOutput(json("""
+            {"type":"minecraft:item"}
+            """)) == null);
+
+        var parsed = LootTableAcquisitionAnalyzer.parseTable("test:gameplay/amethyst_cluster", table)
+            .orElseThrow();
+        assertTrue(parsed.expectedUnitsByItem().isEmpty());
+        assertTrue(parsed.unknownItems().containsAll(List.of(
+            "minecraft:amethyst_cluster", "minecraft:amethyst_shard")));
+        assertTrue(parsed.ordinaryPlayerBreakOutputs().isEmpty(),
+            "an alternatives entry is not a direct ordinary block-break drop");
+
+        var analyzer = LootTableAcquisitionAnalyzer.fromParsedTables(List.of(parsed), 1.0D, 100.0D);
+        for (String candidate : List.of("minecraft:amethyst_cluster", "minecraft:amethyst_shard")) {
+            var path = analyzer.analyze(candidate).getFirst();
+            var expectedUnits = path.evidence().measurement("expected_units_per_attempt");
+            assertFalse(expectedUnits.isKnown());
+            assertEquals(EstimateKind.UNKNOWN, expectedUnits.estimateKind().orElseThrow());
+            assertTrue(expectedUnits.unknownReason().contains("unsupported or conditional loot semantics"));
+            assertEquals("test:gameplay/amethyst_cluster",
+                path.evidence().attributes().get("loot_table"));
+            assertEquals("YIELD_UNKNOWN",
+                path.evidence().attributes().get("loot_analysis_category"));
+            assertTrue(path.evidence().attributes().get("loot_analysis_reason")
+                .contains("expected-yield calculation"));
+            assertTrue(path.feasibilityFactors().get("equipment_availability").isUnknown());
+        }
+    }
+
+    @Test
+    void lootOutputEvidenceDistinguishesSupportedPositiveOutputFromUnknownCandidates() {
+        var supported = LootTableAcquisitionAnalyzer.parseTable("test:chests/supported_output", json("""
+            {"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"test:known_output"}]}]}
+            """)).orElseThrow();
+        var positiveCount = LootTableAcquisitionAnalyzer.parseTable("test:chests/positive_count", json("""
+            {"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"test:unknown_output",
+              "functions":[{"function":"minecraft:set_count","count":{"min":1,"max":3}}]}]}]}
+            """)).orElseThrow();
+        var zeroCount = LootTableAcquisitionAnalyzer.parseTable("test:chests/zero_count", json("""
+            {"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"test:zero_output",
+              "functions":[{"function":"minecraft:set_count","count":0}]}]}]}
+            """)).orElseThrow();
+        var unresolvedCondition = LootTableAcquisitionAnalyzer.parseTable(
+            "test:chests/unresolved_condition", json("""
+                {"pools":[{"rolls":1,"conditions":[{"condition":"minecraft:match_tool","predicate":{}}],
+                  "entries":[{"type":"minecraft:item","name":"test:conditional_output",
+                    "functions":[{"function":"minecraft:set_count","count":{"min":1,"max":3}}]}]}]}
+                """)).orElseThrow();
+        var unsupportedFunction = LootTableAcquisitionAnalyzer.parseTable(
+            "test:chests/unsupported_function", json("""
+                {"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"test:function_output",
+                  "functions":[{"function":"minecraft:set_damage","damage":0.5}]}]}]}
+                """)).orElseThrow();
+        var unresolvedRoute = LootTableAcquisitionAnalyzer.parseTable("test:chests/unresolved_route", json("""
+            {"pools":[{"rolls":1,"entries":[
+              {"type":"minecraft:item","name":"test:reachable_candidate",
+                "functions":[{"function":"minecraft:set_count","count":{"min":1,"max":3}}]},
+              {"type":"minecraft:item","name":"test:other_candidate"}
+            ]}]}
+            """)).orElseThrow();
+        var analyzer = LootTableAcquisitionAnalyzer.fromParsedTables(
+            List.of(supported, positiveCount, zeroCount, unresolvedCondition,
+                unsupportedFunction, unresolvedRoute),
+            1.0D, 100.0D);
+        AcquisitionPath knownPath = analyzer.analyze("test:known_output").getFirst();
+        AcquisitionPath positiveCountPath = analyzer.analyze("test:unknown_output").getFirst();
+
+        assertEquals("PROVEN_POSSIBLE",
+            knownPath.evidence().attributes().get("loot_output_evidence_status"));
+        assertEquals("PROVEN_POSSIBLE",
+            positiveCountPath.evidence().attributes().get("loot_output_evidence_status"));
+        assertTrue(positiveCountPath.evidence().attributes().get("loot_output_evidence_reason")
+            .contains("expected quantity remains unresolved"));
+        assertTrue(knownPath.evidence().measurement("expected_units_per_attempt").isKnown());
+        assertFalse(positiveCountPath.evidence().measurement("expected_units_per_attempt").isKnown());
+        assertTrue(knownPath.costsByHorizon().get(100).factor(EconomicChannel.QUANTITY).isKnown());
+        assertTrue(positiveCountPath.costsByHorizon().get(100)
+            .factor(EconomicChannel.QUANTITY).isUnknown());
+        assertTrue(knownPath.costsByHorizon().get(100)
+            .factor(EconomicChannel.PROBABILITY_BURDEN).isNotApplicable());
+        assertTrue(positiveCountPath.costsByHorizon().get(100)
+            .factor(EconomicChannel.PROBABILITY_BURDEN).isNotApplicable());
+        assertEquals(knownPath.feasibilityFactors().get("equipment_availability"),
+            positiveCountPath.feasibilityFactors().get("equipment_availability"));
+        for (String itemId : List.of("test:zero_output", "test:conditional_output", "test:function_output",
+            "test:reachable_candidate", "test:other_candidate")) {
+            AcquisitionPath candidate = analyzer.analyze(itemId).getFirst();
+            assertEquals("UNKNOWN_CANDIDATE",
+                candidate.evidence().attributes().get("loot_output_evidence_status"), itemId);
+            assertFalse(candidate.evidence().measurement("expected_units_per_attempt").isKnown(), itemId);
+        }
+    }
+
+    @Test
+    void malformedLootFieldsRetainRecoverableCandidatesAndDoNotPoisonOtherTables() {
+        var malformed = json("""
+            {"pools":[{"entries":[
+              {"type":"minecraft:item"},
+              {"type":"minecraft:item","name":"test:conditional_output","functions":"not_an_array"}
+            ]}]}
+            """);
+        var malformedParsed = LootTableAcquisitionAnalyzer.parseTable("test:gameplay/malformed", malformed)
+            .orElseThrow();
+        assertTrue(malformedParsed.expectedUnitsByItem().isEmpty());
+        assertEquals(java.util.Set.of("test:conditional_output"), malformedParsed.unknownItems());
+
+        var independent = LootTableAcquisitionAnalyzer.parseTable("test:gameplay/independent", json("""
+            {"pools":[{"rolls":2,"entries":[{"type":"minecraft:item","name":"test:known_output"}]}]}
+            """)).orElseThrow();
+        var analyzer = LootTableAcquisitionAnalyzer.fromParsedTables(
+            List.of(malformedParsed, independent), 1.0D, 100.0D);
+
+        assertTrue(analyzer.supports("test:conditional_output"));
+        assertTrue(analyzer.supports("test:known_output"));
+        assertEquals(2.0D, analyzer.analyze("test:known_output").getFirst()
+            .evidence().measurement("expected_units_per_attempt").value());
+        assertEquals(EstimateKind.UNKNOWN, analyzer.analyze("test:conditional_output").getFirst()
+            .evidence().measurement("expected_units_per_attempt").estimateKind().orElseThrow());
+    }
+
+    @Test
     void lootFunctionsAndBonusRollsPreserveOutputsButKeepYieldUnknown() {
         var randomCount = json("""
             {"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"test:crop",
@@ -512,6 +1157,8 @@ class AcquisitionAnalyzersTest {
             assertTrue(!path.evidence().measurement("expected_units_per_attempt").isKnown());
             assertEquals(EstimateKind.UNKNOWN,
                 path.evidence().measurement("expected_units_per_attempt").estimateKind().orElseThrow());
+            assertEquals(itemId.equals("test:crop") ? "PROVEN_POSSIBLE" : "UNKNOWN_CANDIDATE",
+                path.evidence().attributes().get("loot_output_evidence_status"));
         }
     }
 
@@ -572,6 +1219,111 @@ class AcquisitionAnalyzersTest {
             PathIdentity.fromMechanicalIdentity(
                 "minecraft:oak_log", "worldgen_feature", "minecraft:oak_log",
                 AcquisitionRequirements.empty(), null, "default").canonicalKey());
+    }
+
+    @Test
+    void pathIdentityDoesNotDependOnEconomicEvaluationOrConfidence() {
+        PathIdentity identity = PathIdentity.fromMechanicalIdentity("test:item", "test:source", "test:path",
+            AcquisitionRequirements.empty(), null, "cycle-a", "condition-a", "operation-a");
+        AcquisitionPath first = identityPath(identity, 0.9D, schedule(0.1D));
+        AcquisitionPath second = identityPath(identity, 0.4D, schedule(0.2D));
+
+        assertEquals(first.pathIdentity(), second.pathIdentity());
+        assertEquals(1, AcquisitionPathDeduplicator.deduplicate(List.of(first, second)).size());
+    }
+
+    @Test
+    void pathIdentityDoesNotDependOnDownstreamRiskEvaluation() {
+        PathIdentity identity = PathIdentity.fromMechanicalIdentity("test:item", "test:source", "test:path",
+            AcquisitionRequirements.empty(), null, "cycle-a", "condition-a", "operation-a");
+        AcquisitionPath lowerRisk = identityPath(identity, 1.0D, null, 0.2D);
+        AcquisitionPath higherRisk = identityPath(identity, 1.0D, null, 0.8D);
+
+        assertEquals(lowerRisk.pathIdentity(), higherRisk.pathIdentity());
+        AcquisitionPath merged = AcquisitionPathDeduplicator.deduplicate(List.of(lowerRisk, higherRisk)).getFirst();
+        assertEquals("CONFLICT", merged.evidence().attributes().get("acquisition_path_deduplication_status"));
+        assertEquals("[\"0x1.999999999999ap-1\",\"0x1.999999999999ap-3\"]",
+            merged.evidence().attributes().get("deduplication.risk_values"));
+        assertTrue(merged.risk() == null);
+    }
+
+    @Test
+    void pathIdentityPreservesRequirementsSatisfiersCycleConditionsAndOperationInputs() {
+        AcquisitionRequirements requirementA = new AcquisitionRequirements(
+            List.of(new RequirementExpression.Atom("tool:diamond", "diamond tool")));
+        AcquisitionRequirements requirementB = new AcquisitionRequirements(
+            List.of(new RequirementExpression.Atom("tool:iron", "iron tool")));
+        CapabilitySatisfaction satisfactionA =
+            new CapabilitySatisfaction("tool:diamond", "item:diamond_pickaxe", "tool", Map.of());
+        CapabilitySatisfaction satisfactionB =
+            new CapabilitySatisfaction("tool:diamond", "item:netherite_pickaxe", "tool", Map.of());
+        PathIdentity base = PathIdentity.fromMechanicalIdentity("test:item", "test:source", "test:path",
+            requirementA, satisfactionA, "cycle-a", "branch-a", "operation-a");
+        List<PathIdentity> identities = List.of(
+            base,
+            PathIdentity.fromMechanicalIdentity("test:item", "test:source", "test:path",
+                requirementB, satisfactionA, "cycle-a", "branch-a", "operation-a"),
+            PathIdentity.fromMechanicalIdentity("test:item", "test:source", "test:path",
+                requirementA, satisfactionB, "cycle-a", "branch-a", "operation-a"),
+            PathIdentity.fromMechanicalIdentity("test:item", "test:source", "test:path",
+                requirementA, satisfactionA, "cycle-b", "branch-a", "operation-a"),
+            PathIdentity.fromMechanicalIdentity("test:item", "test:source", "test:path",
+                requirementA, satisfactionA, "cycle-a", "branch-b", "operation-a"),
+            PathIdentity.fromMechanicalIdentity("test:item", "test:source", "test:path",
+                requirementA, satisfactionA, "cycle-a", "branch-a", "operation-b")
+        );
+        List<AcquisitionPath> paths = identities.stream()
+            .map(identity -> identityPath(identity, 1.0D, null)).toList();
+
+        assertEquals(identities.size(), paths.stream().map(AcquisitionPath::pathIdentity).distinct().count());
+        assertEquals(identities.size(), AcquisitionPathDeduplicator.deduplicate(paths).size());
+    }
+
+    @Test
+    void pathIdentityIncludesRecipeInputMechanicsRegardlessOfInputOrder() {
+        AcquisitionIngredient consumedWheat = new AcquisitionIngredient(List.of("test:wheat"), 2);
+        AcquisitionIngredient reusableTool = new AcquisitionIngredient(List.of("test:tool"), 1,
+            AcquisitionIngredient.InputUse.REUSABLE);
+        AcquisitionPath first = new AcquisitionPath("test:item", "recipe", "test:recipe", 1.0D,
+            null, null, true, false, Map.of(), Map.of(),
+            new AcquisitionEvidence(Map.of(), Map.of(), List.of(consumedWheat, reusableTool)));
+        AcquisitionPath reordered = new AcquisitionPath("test:item", "recipe", "test:recipe", 1.0D,
+            null, null, true, false, Map.of(), Map.of(),
+            new AcquisitionEvidence(Map.of(), Map.of(), List.of(reusableTool, consumedWheat)));
+        AcquisitionPath differentInput = new AcquisitionPath("test:item", "recipe", "test:recipe", 1.0D,
+            null, null, true, false, Map.of(), Map.of(),
+            new AcquisitionEvidence(Map.of(), Map.of(), List.of(
+                new AcquisitionIngredient(List.of("test:wheat"), 3), reusableTool)));
+
+        assertEquals(first.pathIdentity(), reordered.pathIdentity());
+        assertFalse(first.pathIdentity().equals(differentInput.pathIdentity()));
+    }
+
+    private static AcquisitionPath identityPath(PathIdentity identity, double confidence,
+        EconomicCostSchedule schedule) {
+        return identityPath(identity, confidence, schedule, null);
+    }
+
+    private static AcquisitionPath lootPath(String tableId, String sourceType,
+        Set<String> ordinaryPlayerBreakOutputs, Boolean requiresCorrectTool) {
+        LootTableAcquisitionAnalyzer.ParsedTable table = new LootTableAcquisitionAnalyzer.ParsedTable(
+            tableId, sourceType, Map.of("test:drop", 1.0D), Set.of(),
+            Map.of("test:drop", new LootTableAcquisitionAnalyzer.LootEvidence(1.0D, 1.0D)),
+            ordinaryPlayerBreakOutputs, requiresCorrectTool);
+        return LootTableAcquisitionAnalyzer.fromParsedTables(List.of(table), 1.0D, 100.0D)
+            .analyze("test:drop").getFirst();
+    }
+
+    private static AcquisitionPath identityPath(PathIdentity identity, double confidence,
+        EconomicCostSchedule schedule, Double risk) {
+        return new AcquisitionPath(identity.resourceId(), identity.sourceType(), identity.sourceId(),
+            confidence, null, risk, true, false, Map.of(), Map.of(), AcquisitionEvidence.empty(),
+            EconomicCost.unknown("test economic evaluation"), schedule, identity);
+    }
+
+    private static EconomicCostSchedule schedule(double startup) {
+        return new EconomicCostSchedule(EconomicCostComponent.known(startup, "test:primitive", "test startup"),
+            EconomicCostComponent.notApplicable("test recurring"), "test schedule");
     }
 
     private static JsonObject json(String text) {

@@ -60,6 +60,7 @@ public class DynamicFood {
         NeoForge.EVENT_BUS.addListener(this::onServerStarted);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         modEventBus.addListener(this::onConfigReloaded);
+        ENGINE.setProviderModelChangeListener(() -> onEconomicInputsChanged("acquisition provider update"));
     }
 
     private void onReloadListeners(AddReloadListenerEvent event) {
